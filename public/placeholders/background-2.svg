@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 1080" width="1440" height="1080">
+  <defs>
+    <linearGradient id="cave2" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0d1116"/>
+      <stop offset="55%" stop-color="#161c24"/>
+      <stop offset="100%" stop-color="#080a0e"/>
+    </linearGradient>
+  </defs>
+  <rect width="1440" height="1080" fill="url(#cave2)"/>
+  <path d="M0 0 H1440 V430 C1200 520 240 520 0 430 Z" fill="#0a0d12"/>
+  <g fill="#131a22">
+    <path d="M120 780 V520 A130 130 0 0 1 380 520 V780 Z"/>
+    <path d="M470 780 V520 A130 130 0 0 1 730 520 V780 Z"/>
+    <path d="M820 780 V520 A130 130 0 0 1 1080 520 V780 Z"/>
+    <path d="M1170 780 V520 A130 130 0 0 1 1430 520 V780 Z"/>
+  </g>
+  <rect y="780" width="1440" height="300" fill="#141b23"/>
+  <g stroke="#1f2a35" stroke-width="4" opacity="0.8">
+    <path d="M0 860 H1440"/>
+    <path d="M0 960 H1440"/>
+    <path d="M360 780 V1080"/>
+    <path d="M720 780 V1080"/>
+    <path d="M1080 780 V1080"/>
+  </g>
+  <ellipse cx="720" cy="820" rx="420" ry="70" fill="#5f7f9a" opacity="0.1"/>
+</svg>

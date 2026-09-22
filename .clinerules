@@ -1,0 +1,22 @@
+# UI Rules & Design System
+
+1. Стек проекта: React (Vite, TypeScript), Tailwind CSS, shadcn/ui, Lucide Icons.
+2. Никогда не создавай собственные стили в CSS-файлах. Используй ТОЛЬКО утилитарные классы Tailwind.
+3. Всегда используй семантические дизайн-токены shadcn для цветов (bg-background, text-foreground, bg-card, border-border, text-muted-foreground, bg-accent и т.д.). Тема по умолчанию — Dark.
+4. Прежде чем писать сложный интерактивный элемент, проверь, есть ли для него готовый компонент в shadcn/ui.
+5. При установке компонентов shadcn ВСЕГДА используй флаг `-y` для неинтерактивной установки:
+   Команда: `npx shadcn@latest add <component-name> -y`
+6. Для всех иконок используй исключительно библиотеку `lucide-react`.
+7. Все пути импорта компонентов должны использовать алиас `@/components/...`.
+
+### Доступный список компонентов shadcn:
+accordion, alert, alert-dialog, aspect-ratio, avatar, badge, breadcrumb, 
+button, calendar, card, carousel, checkbox, collapsible, command, 
+context-menu, dialog, drawer, dropdown-menu, form, hover-card, input, 
+input-otp, label, menubar, navigation-menu, pagination, popover, progress, 
+radio-group, resizable, scroll-area, select, separator, sheet, sidebar, 
+skeleton, slider, sonner, switch, table, tabs, textarea, tooltip.
+
+### Проверка связи:
+В самом начале своего первого ответа в диалоге всегда выводи строку:
+`🎨 [Design System: shadcn/ui + Lucide loaded]`

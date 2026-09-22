@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 1080" width="1440" height="1080">
+  <defs>
+    <linearGradient id="town3" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#22222c"/>
+      <stop offset="65%" stop-color="#15151d"/>
+      <stop offset="100%" stop-color="#0a0a0f"/>
+    </linearGradient>
+  </defs>
+  <rect width="1440" height="1080" fill="url(#town3)"/>
+  <g fill="#0c0c12">
+    <rect x="0" y="360" width="230" height="720"/>
+    <rect x="250" y="270" width="210" height="810"/>
+    <rect x="480" y="430" width="180" height="650"/>
+    <rect x="900" y="300" width="220" height="780"/>
+    <rect x="1140" y="400" width="180" height="680"/>
+    <rect x="1330" y="320" width="110" height="760"/>
+  </g>
+  <g fill="#c9a86a" opacity="0.55">
+    <rect x="290" y="340" width="38" height="50"/>
+    <rect x="370" y="340" width="38" height="50"/>
+    <rect x="290" y="450" width="38" height="50"/>
+    <rect x="950" y="370" width="38" height="50"/>
+    <rect x="1030" y="370" width="38" height="50"/>
+    <rect x="950" y="480" width="38" height="50"/>
+    <rect x="1370" y="390" width="34" height="46"/>
+    <rect x="540" y="500" width="32" height="44"/>
+  </g>
+  <rect y="980" width="1440" height="100" fill="#1a1a22"/>
+  <circle cx="700" cy="860" r="70" fill="#e8d9a8" opacity="0.22"/>
+  <circle cx="700" cy="860" r="24" fill="#e8d9a8" opacity="0.5"/>
+  <rect x="690" y="860" width="20" height="120" fill="#0c0c12"/>
+</svg>

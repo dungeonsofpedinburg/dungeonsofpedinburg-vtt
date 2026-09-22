@@ -19,6 +19,7 @@ import type {
   IconComponent,
   MapToken,
   SceneNotes,
+  SoundpadSlot,
 } from "@/data/types"
 
 /** Порядок групп в библиотеке фонов. */
@@ -99,3 +100,9 @@ export const initialSceneNotes: SceneNotes = {
   "bg-town-hall":
     "Социальная сцена: бургомистр объявляет награду за голову «серого алхимика». Три фракции ищут поддержки партии. Каждые 15 минут — новый слух.",
 }
+
+/**
+ * Саундпад начинается пустым: звуки — дело конкретного выпуска, а готовых
+ * эффектов у проекта нет. Мастер добавляет плитки сам, «плюс» в конце ряда.
+ */
+export const initialSoundpad: SoundpadSlot[] = []

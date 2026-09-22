@@ -1,9 +1,11 @@
 import { ImageOff, X } from "lucide-react"
+import { useEffect, useRef, type RefObject } from "react"
 import { DiceOverlay } from "@/components/dice/DiceOverlay"
 import { BattleMapGrid } from "@/components/master-panel/BattleMapGrid"
 import { Button } from "@/components/ui/button"
 import { backgroundIcons } from "@/data/seed"
 import { ROLL_RESULT_TEXT, formatRollBreakdown } from "@/lib/dice"
+import { isVideoSrc, shouldSeekVideo } from "@/lib/media"
 import { useEpisodeStore } from "@/store/useEpisodeStore"
 import { cn } from "@/lib/utils"
 import type { Background, Character } from "@/data/types"
@@ -17,6 +19,11 @@ type SceneStageProps = {
    * экран OBS ("screen"), а Мастер получает готовый итог для плашки.
    */
   diceRole?: "master" | "screen"
+  /**
+   * Ссылка на `<video>` активной видео-сцены. Плеер Мастера живёт в Viewport и
+   * управляет ровно тем элементом, что видно в превью; на /screen ссылка не нужна.
+   */
+  videoRef?: RefObject<HTMLVideoElement | null>
 }
 
 /**
@@ -29,6 +36,7 @@ export function SceneStage({
   className,
   interactive = false,
   diceRole = "master",
+  videoRef,
 }: SceneStageProps) {
   const backgrounds = useEpisodeStore((state) => state.backgrounds)
   const activeBackgroundId = useEpisodeStore((state) => state.activeBackgroundId)
@@ -95,6 +103,9 @@ export function SceneStage({
           background={layer.background}
           leaving={layer.leaving}
           showHint={interactive}
+          // Ссылку на видео отдаём только активному слою: уходящая сцена в
+          // переходе — фон затухания, плеер ею не управляет.
+          videoRef={layer.leaving ? undefined : videoRef}
         />
       ))}
 
@@ -179,18 +190,64 @@ export function SceneStage({
 }
 
 /**
- * Один слой сцены: карта местности, картинка или подсказка для пустой сцены.
+ * Один слой сцены: карта местности, видео, картинка или подсказка для пустой сцены.
  */
 function SceneLayer({
   background,
   leaving,
   showHint,
+  videoRef,
 }: {
   background: Background
   leaving: boolean
   showHint: boolean
+  videoRef?: RefObject<HTMLVideoElement | null>
 }) {
   const Icon = backgroundIcons[background.id]
+  const isVideo = isVideoSrc(background.src)
+  // Пауза, повтор и перемотка видео: одно состояние на оба окна. Мастер меняет
+  // его из плеера, /screen получает снапшотом — и оба применяют здесь.
+  const { isPlaying, isLoop, seekId, seekTime } = useEpisodeStore(
+    (state) => state.videoPlayback
+  )
+
+  // Своя ссылка на элемент нужна всегда: у /screen плеера нет, а команды из
+  // стора обязаны применяться к тому же самому <video>.
+  const ownVideoRef = useRef<HTMLVideoElement | null>(null)
+  const videoNode = videoRef ?? ownVideoRef
+
+  /**
+   * Пауза и возобновление. Уходящий слой (переход между сценами) команд не
+   * слушает: это фон затухания, дёргать его из плеера незачем.
+   */
+  useEffect(() => {
+    const video = videoNode.current
+    if (!video || !isVideo || leaving) return
+    if (isPlaying) void video.play().catch(() => {})
+    else video.pause()
+  }, [isPlaying, isVideo, leaving, background.src, videoNode])
+
+  /** Повтор: держим свойство элемента в согласии со стором. */
+  useEffect(() => {
+    const video = videoNode.current
+    if (!video || leaving) return
+    video.loop = isLoop
+  }, [isLoop, leaving, background.src, videoNode])
+
+  /**
+   * Перемотка приходит событием: `seekId` — метка команды, `seekTime` — её
+   * значение. Мелкие расхождения (< 0.3 с) игнорируем, чтобы текущий кадр не
+   * дёргался на каждой команде паузы.
+   */
+  useEffect(() => {
+    const video = videoNode.current
+    if (!video || !isVideo || leaving) return
+    if (shouldSeekVideo(video.currentTime, seekTime)) {
+      video.currentTime = seekTime
+    }
+    // Зависимость только от метки: смена времени без нового события — не команда.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seekId, leaving])
 
   return (
     <div
@@ -201,7 +258,23 @@ function SceneLayer({
           : "animate-in fade-in duration-500"
       )}
     >
-      {background.src ? (
+      {isVideo ? (
+        <video
+          // Ключ по пути: смена сцены пересоздаёт элемент, и автоплей срабатывает
+          // заново — на превью Мастера и на /screen одинаково.
+          key={background.src}
+          ref={videoNode}
+          src={background.src}
+          // Автоплей нужен только для первого кадра: состояние из стора
+          // применяется эффектами выше (пауза приедет сразу после монтирования).
+          autoPlay
+          playsInline
+          // Фон не перебивает саундтрек: звук у видео-сцены всегда выключен.
+          muted
+          loop={isLoop}
+          className="absolute inset-0 size-full object-cover"
+        />
+      ) : background.src ? (
         <img
           src={background.src}
           alt={background.title}

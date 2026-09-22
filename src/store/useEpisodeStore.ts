@@ -6,10 +6,22 @@ import {
   initialCharacters,
   initialMapTokens,
   initialSceneNotes,
+  initialSoundpad,
 } from "@/data/seed"
 import { normalizeEpisodeAssets } from "@/lib/asset-url"
 import { initialsFromName } from "@/lib/character"
-import { ROLL_PLAQUE_MS, notationToSides, rollWaitMsFor } from "@/lib/dice"
+import { initialVideoPlayback, nextSeekId, videoPlaybackForScene } from "@/lib/media"
+import {
+  normalizeSoundpadIcon,
+  soundpadTitleFallback,
+} from "@/lib/soundpad"
+import {
+  ROLL_PLAQUE_MS,
+  diceSum,
+  estimateDiceRoll,
+  notationToSides,
+  rollWaitMsFor,
+} from "@/lib/dice"
 import type {
   ActGroup,
   Background,
@@ -21,10 +33,12 @@ import type {
   MapToken,
   RollDie,
   SceneNotes,
+  SoundpadSlot,
   StagePhase,
   SyncedEpisode,
   TokenCategory,
   Track,
+  VideoPlaybackState,
 } from "@/data/types"
 
 export const MAX_DICE_PER_TYPE = 5
@@ -55,6 +69,15 @@ export type TrackInput = {
   coverSrc: string
 }
 
+/** Слот саундпада на входе: id всегда выдаёт стор. */
+export type SoundpadSlotInput = {
+  title: string
+  /** Имя иконки lucide-react из набора `SOUNDPAD_ICON_NAMES` */
+  icon: string
+  /** Путь к звуку или data-URL выбранного файла */
+  src: string
+}
+
 export type AddBackgroundOptions = {
   /** Название сцены: по умолчанию «Новая сцена N» */
   title?: string
@@ -64,6 +87,11 @@ export type AddBackgroundOptions = {
   activate?: boolean
 }
 
+/**
+ * Живое состояние видео-фона (пауза, повтор, перемотка) — общее для Мастера и
+ * /screen: команды плеера уходят в стор, а оттуда снапшотом на экран OBS.
+ * Сбрасывается при смене сцены: новое видео стартует с начала в обоих окнах.
+ */
 type EpisodeState = {
   /** Название выпуска — правится прямо в хэдере */
   episodeTitle: string
@@ -81,6 +109,13 @@ type EpisodeState = {
   mapTokens: MapToken[]
   activeMapId: string | null
   sceneNotes: SceneNotes
+  /**
+   * Слоты саундпада — быстрые звуковые эффекты поверх музыки. Живут только в
+   * панели Мастера: на /screen звук не транслируется (как и треки).
+   */
+  soundpad: SoundpadSlot[]
+  /** Управление видео-фоном: пауза, повтор и перемотка — одно на оба окна */
+  videoPlayback: VideoPlaybackState
   dicePool: DieSides[]
   lastRoll: DiceRollResult | null
   /** Последний запрос броска: id растёт, dice — нотации для экрана OBS */
@@ -117,6 +152,16 @@ type EpisodeState = {
   duplicateBackground: (backgroundId: string) => void
   /** Удаление сцены; последнюю сцену выпуска удалить нельзя */
   removeBackground: (backgroundId: string) => void
+  /** Зацикливание видео-сцены: рубильник в плеере Viewport Мастера */
+  setBackgroundLoop: (backgroundId: string, isLoop: boolean) => void
+  /** Пауза и возобновление видео-фона — команда уезжает и на /screen */
+  setVideoPlaying: (isPlaying: boolean) => void
+  /** Кнопка Play/Pause в плеере Мастера */
+  toggleVideoPlaying: () => void
+  /** Повтор видео: общее состояние и настройка самой сцены */
+  setVideoLoop: (isLoop: boolean) => void
+  /** Перемотка: время в секундах; каждое событие помечается новым seekId */
+  seekVideo: (time: number) => void
   moveBackground: (sourceId: string, targetId: string) => void
   toggleBattlemapMode: (backgroundId: string) => void
   updateSceneNote: (backgroundId: string, note: string) => void
@@ -129,6 +174,19 @@ type EpisodeState = {
   addTrack: (input: TrackInput) => string
   updateTrack: (trackId: string, patch: Partial<TrackInput>) => void
   removeTrack: (trackId: string) => void
+  /** Новый слот саундпада: возвращает его id, чтобы сразу открыть правку */
+  addSoundpadSlot: (input: SoundpadSlotInput) => string
+  updateSoundpadSlot: (slotId: string, patch: Partial<SoundpadSlotInput>) => void
+  removeSoundpadSlot: (slotId: string) => void
+  /**
+   * Удаление пачкой из режима множественного выделения. Персонажи уходят со
+   * сцены и с карт, сцены — вместе с раскладкой токенов и заметками: всё, что
+   * тянется за элементом, чистит стор, а не компонент.
+   */
+  deleteBatchCharacters: (ids: string[]) => void
+  deleteBatchBackgrounds: (ids: string[]) => void
+  deleteBatchTracks: (ids: string[]) => void
+  deleteBatchSoundpadSlots: (ids: string[]) => void
   toggleCharacterOnStage: (characterId: string) => void
   addToken: (
     characterId: string,
@@ -146,8 +204,12 @@ type EpisodeState = {
    * Итог возвращает физика экрана (completeDiceRoll), он же попадает в плашку.
    */
   triggerDiceRoll: (notation: string[]) => void
-  /** Записывает фактический результат физики: экран OBS или локальный фолбэк */
-  completeDiceRoll: (dice: RollDie[], sum: number) => void
+  /**
+   * Записывает итог броска: фактические значения физики с экрана OBS или
+   * локальную оценку. `estimated` — значения случайные (физика не ответила),
+   * в плашке такой итог идёт со знаком «≈».
+   */
+  completeDiceRoll: (dice: RollDie[], sum: number, estimated?: boolean) => void
   clearRoll: () => void
   /** Сколько экранов OBS на связи — приходит из presence sync-сервера. */
   setSyncScreens: (count: number) => void
@@ -234,15 +296,11 @@ function resolveSceneGroups(backgrounds: Background[], groups?: string[]) {
  * со знаком «≈», чтобы его не приняли за честный бросок 3D-кубиков.
  */
 function estimateRoll(pool: DieSides[]): DiceRollResult {
-  const dice = pool.map((sides) => ({
-    sides,
-    value: Math.floor(Math.random() * sides) + 1,
-  }))
-  const sum = dice.reduce((total, die) => total + die.value, 0)
+  const dice = estimateDiceRoll(pool)
   return {
     id: nextId("roll"),
     dice,
-    sum,
+    sum: diceSum(dice),
     createdAt: Date.now(),
     estimated: true,
   }
@@ -304,6 +362,7 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
   sceneGroups: [...actGroups],
   characters: initialCharacters,
   tracks: initialTracks,
+  soundpad: initialSoundpad,
   activeBackgroundId: initialBackgrounds[0].id,
   previousBackgroundId: null,
   activeCharacterId: null,
@@ -316,6 +375,7 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
   lastRollEvent: null,
   isRollPending: false,
   syncScreens: 0,
+  videoPlayback: initialVideoPlayback(),
 
   setActiveBackground: (backgroundId) =>
     set((state) => {
@@ -328,6 +388,12 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
         previousBackgroundId: state.activeBackgroundId,
         activeBackgroundId: backgroundId,
         activeMapId: background.isBattlemap ? backgroundId : state.activeMapId,
+        // Новое видео стартует с начала и играет: срок годности команд плеера
+        // истёк, а seekId сменился — /screen получит синхронный старт с 00:00.
+        videoPlayback: videoPlaybackForScene(
+          background,
+          state.videoPlayback.seekId
+        ),
       }
     }),
 
@@ -420,6 +486,58 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
         state.activeMapId === backgroundId ? null : state.activeMapId,
     })
   },
+
+  setBackgroundLoop: (backgroundId, isLoop) =>
+    set((state) => ({
+      backgrounds: state.backgrounds.map((item) =>
+        item.id === backgroundId ? { ...item, isLoop } : item
+      ),
+    })),
+
+  /**
+   * Пауза и возобновление видео. Одна команда на оба окна: /screen применит её
+   * из снапшота, поэтому проектор не продолжит играть сам по себе.
+   */
+  setVideoPlaying: (isPlaying) =>
+    set((state) => ({
+      videoPlayback: { ...state.videoPlayback, isPlaying },
+    })),
+
+  toggleVideoPlaying: () =>
+    set((state) => ({
+      videoPlayback: {
+        ...state.videoPlayback,
+        isPlaying: !state.videoPlayback.isPlaying,
+      },
+    })),
+
+  /**
+   * Повтор видео. Пишем и в живое состояние (его видят оба окна), и в саму сцену:
+   * так выбор Мастера переживает возврат на сцену и уезжает в файл выпуска.
+   */
+  setVideoLoop: (isLoop) =>
+    set((state) => ({
+      videoPlayback: { ...state.videoPlayback, isLoop },
+      backgrounds: state.backgrounds.map((item) =>
+        item.id === state.activeBackgroundId ? { ...item, isLoop } : item
+      ),
+    })),
+
+  /**
+   * Перемотка: храним время и метку события. По `seekId` элементы видео в обоих
+   * окнах понимают, что поступила новая команда (сравнивать одно время мало:
+   * повторная перемотка в ту же секунду не изменила бы состояние).
+   */
+  seekVideo: (time) =>
+    set((state) => ({
+      videoPlayback: {
+        ...state.videoPlayback,
+        seekTime: Number.isFinite(time) && time > 0 ? time : 0,
+        // Метка строго растёт: две перемотки подряд в одну миллисекунду не
+        // потеряются (эффекты окон реагируют именно на смену метки).
+        seekId: nextSeekId(state.videoPlayback.seekId),
+      },
+    })),
 
   moveBackground: (sourceId, targetId) =>
     set((state) => {
@@ -675,6 +793,139 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
       tracks: state.tracks.filter((track) => track.id !== trackId),
     })),
 
+  addSoundpadSlot: (input) => {
+    const index = get().soundpad.length
+    const slot: SoundpadSlot = {
+      id: nextId("sfx"),
+      title: input.title.trim() || soundpadTitleFallback(index),
+      // Имя иконки приходит из UI, но стор не доверяет ему: в поле уезжает
+      // компонент lucide, а в файле выпуска — строку проверяет тот же набор.
+      icon: normalizeSoundpadIcon(input.icon),
+      src: input.src.trim(),
+    }
+    set((state) => ({ soundpad: [...state.soundpad, slot] }))
+    return slot.id
+  },
+
+  updateSoundpadSlot: (slotId, patch) =>
+    set((state) => ({
+      soundpad: state.soundpad.map((slot) =>
+        slot.id === slotId
+          ? {
+              ...slot,
+              ...patch,
+              ...(patch.icon ? { icon: normalizeSoundpadIcon(patch.icon) } : {}),
+            }
+          : slot
+      ),
+    })),
+
+  removeSoundpadSlot: (slotId) =>
+    set((state) => ({
+      soundpad: state.soundpad.filter((slot) => slot.id !== slotId),
+    })),
+
+  deleteBatchCharacters: (ids) => {
+    if (ids.length === 0) return
+    clearStageTimer()
+    const doomed = new Set(ids)
+    set((state) => {
+      // Если удаляем того, кто сейчас на сцене, — сцену гасим целиком.
+      const wasStaged =
+        Boolean(
+          state.activeCharacterId && doomed.has(state.activeCharacterId)
+        ) ||
+        Boolean(
+          state.stageFromCharacterId && doomed.has(state.stageFromCharacterId)
+        ) ||
+        Boolean(
+          state.stageToCharacterId && doomed.has(state.stageToCharacterId)
+        )
+      return {
+        characters: state.characters.filter(
+          (character) => !doomed.has(character.id)
+        ),
+        // Токены удалённых уходят с карт: висячих фишек не остаётся.
+        mapTokens: state.mapTokens.filter(
+          (token) => !doomed.has(token.characterId)
+        ),
+        ...(wasStaged ? { activeCharacterId: null, ...IDLE_STAGE } : {}),
+      }
+    })
+  },
+
+  deleteBatchBackgrounds: (ids) => {
+    if (ids.length === 0) return
+    set((state) => {
+      if (state.backgrounds.length === 0) return {}
+      const doomed = new Set(ids)
+      const survivors = state.backgrounds.filter(
+        (item) => !doomed.has(item.id)
+      )
+      // Выделили все сцены — одну всё равно оставляем: на проекторе должно быть
+      // что показывать. Оставляем ту, что сейчас в эфире.
+      if (survivors.length === 0) {
+        const keeper =
+          state.backgrounds.find(
+            (item) => item.id === state.activeBackgroundId
+          ) ?? state.backgrounds[state.backgrounds.length - 1]
+        survivors.push(keeper)
+        doomed.delete(keeper.id)
+      }
+
+      const sceneNotes = { ...state.sceneNotes }
+      doomed.forEach((id) => {
+        delete sceneNotes[id]
+      })
+
+      // Эфирную сцену заменяет соседняя по списку — та же логика, что у одиночного
+      // удаления: индекс ищем в исходном порядке.
+      const activeIndex = Math.max(
+        state.backgrounds.findIndex(
+          (item) => item.id === state.activeBackgroundId
+        ),
+        0
+      )
+      const activeBackgroundId = doomed.has(state.activeBackgroundId)
+        ? survivors[Math.min(activeIndex, survivors.length - 1)].id
+        : state.activeBackgroundId
+
+      return {
+        backgrounds: survivors,
+        sceneNotes,
+        mapTokens: state.mapTokens.filter(
+          (token) => !doomed.has(token.mapId)
+        ),
+        activeBackgroundId,
+        previousBackgroundId:
+          state.previousBackgroundId &&
+          doomed.has(state.previousBackgroundId)
+            ? null
+            : state.previousBackgroundId,
+        activeMapId:
+          state.activeMapId && doomed.has(state.activeMapId)
+            ? (survivors.find((item) => item.isBattlemap)?.id ?? null)
+            : state.activeMapId,
+      }
+    })
+  },
+
+  deleteBatchTracks: (ids) => {
+    if (ids.length === 0) return
+    const doomed = new Set(ids)
+    set((state) => ({
+      tracks: state.tracks.filter((track) => !doomed.has(track.id)),
+    }))
+  },
+
+  deleteBatchSoundpadSlots: (ids) => {
+    if (ids.length === 0) return
+    const doomed = new Set(ids)
+    set((state) => ({
+      soundpad: state.soundpad.filter((slot) => !doomed.has(slot.id)),
+    }))
+  },
+
   toggleCharacterOnStage: (characterId) => {
     const state = useEpisodeStore.getState()
     const nextCharacterId =
@@ -832,7 +1083,7 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
     }, waitMs)
   },
 
-  completeDiceRoll: (dice, sum) => {
+  completeDiceRoll: (dice, sum, estimated = false) => {
     clearRollTimers()
     set({
       lastRoll: {
@@ -840,6 +1091,9 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
         dice,
         sum,
         createdAt: Date.now(),
+        // Флаг «≈» едет вместе с результатом: его посчитал не физический мир,
+        // а сторожевой таймер /screen (или фолбэк Мастера).
+        ...(estimated ? { estimated: true } : {}),
       },
       // Результат пришёл — блокировка кнопки снимается.
       isRollPending: false,
@@ -868,6 +1122,7 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
       sceneGroups: [...actGroups],
       characters: initialCharacters,
       tracks: initialTracks,
+      soundpad: initialSoundpad,
       activeBackgroundId: initialBackgrounds[0].id,
       previousBackgroundId: null,
       activeCharacterId: null,
@@ -879,6 +1134,8 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
       lastRoll: null,
       lastRollEvent: null,
       isRollPending: false,
+      // Новый выпуск — видео с начала и на паузе не стоит.
+      videoPlayback: initialVideoPlayback(),
     })
   },
 
@@ -917,6 +1174,12 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
         sceneGroups,
         characters: source.characters,
         tracks: source.tracks.length > 0 ? source.tracks : state.tracks,
+        // Пустой саундпад в файле — не повод стереть уже настроенные звуки
+        // (как и треки): плитки живут в панели Мастера, а не в выпуске.
+        soundpad:
+          (source.soundpad?.length ?? 0) > 0
+            ? (source.soundpad ?? [])
+            : state.soundpad,
         // Токены без владельца отбрасываем, иначе останутся «висячие» фишки.
         mapTokens: source.mapTokens.filter((token) =>
           source.characters.some(
@@ -939,6 +1202,8 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
         lastRoll: null,
         lastRollEvent: null,
         isRollPending: false,
+        // Импорт — как новый выпуск: видео-команды прежней сессии не переносим.
+        videoPlayback: initialVideoPlayback(),
       }
     })
   },
@@ -958,5 +1223,8 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
       lastRoll: remote.lastRoll,
       lastRollEvent: remote.lastRollEvent,
       isRollPending: remote.isRollPending,
+      // Команды плеера Мастера приходят снапшотом: пауза, повтор и перемотка
+      // применяются к видео на этом экране тем же кодом, что и в панели.
+      videoPlayback: remote.videoPlayback,
     }),
 }))

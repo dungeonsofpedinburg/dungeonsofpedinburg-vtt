@@ -1,3 +1,4 @@
+import { tokenCategories } from "@/data/content"
 import type { TokenCategory } from "@/data/types"
 
 /**
@@ -38,10 +39,35 @@ export const categoryLabels: Record<TokenCategory, string> = {
   item: "Предметы",
 }
 
-/** Подсказка в пустой колонке: как выглядит рамка без выбора и с выбором. */
-export const categoryHints: Record<TokenCategory, string> = {
-  hero: "серая рамка, белая при выборе",
-  npc: "тёмно-серая рамка, серая при выборе",
-  enemy: "тёмно-красная рамка, красная при выборе",
-  item: "тёмно-жёлтая рамка, жёлтая при выборе",
+/**
+ * Рамки компактных круглых токенов: цвет рамки — это категория персонажа.
+ * Требование макета: герои — белая, NPC — серая, противники — красная,
+ * предметы — жёлтая. Выбор и метка «уже на карте» показываются не цветом
+ * рамки, а кольцами (см. TokenPanel), поэтому категория всегда читается.
+ */
+export const compactTokenBorders: Record<TokenCategory, string> = {
+  hero: "border-zinc-100",
+  npc: "border-zinc-500",
+  enemy: "border-red-500",
+  item: "border-amber-400",
+}
+
+/**
+ * Атрибут колонки категорий. По нему жест «перетащил и отпустил» понимает, куда
+ * попал курсор: над колонкой — меняем категорию, над сеткой — ставим токен на
+ * клетку. Так круглому токену не нужны ручки перетаскивания внутри.
+ */
+export const TOKEN_COLUMN_ATTRIBUTE = "data-token-category"
+
+/** Категория колонки под точкой отпускания (null — отпустили мимо колонок). */
+export function tokenCategoryAtPoint(clientX: number, clientY: number) {
+  if (typeof document === "undefined") return null
+  // Ghost перетаскивания всегда pointer-events-none, поэтому здесь именно колонка.
+  const value = document
+    .elementFromPoint(clientX, clientY)
+    ?.closest(`[${TOKEN_COLUMN_ATTRIBUTE}]`)
+    ?.getAttribute(TOKEN_COLUMN_ATTRIBUTE)
+  return (tokenCategories as readonly string[]).includes(value ?? "")
+    ? (value as TokenCategory)
+    : null
 }

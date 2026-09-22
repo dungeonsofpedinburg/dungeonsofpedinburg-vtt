@@ -16,10 +16,12 @@ type RequestStateMessage = { type: "request-state" }
 /**
  * Обратный канал: экран OBS посчитал физику и отдаёт фактические значения
  * кубиков Мастеру, чтобы плашка с итогом была одна на оба окна.
+ * `estimated` — физика не ответила (сторожевой таймер), значения случайные:
+ * плашка Мастера пометит такой итог знаком «≈».
  */
 type RollResultMessage = {
   type: "roll-result"
-  payload: { eventId: number; dice: RollDie[]; sum: number }
+  payload: { eventId: number; dice: RollDie[]; sum: number; estimated?: boolean }
 }
 /** Состояния нет и мастера нет — экран показывает ожидание. */
 type NoStateMessage = { type: "no-state" }
@@ -113,6 +115,8 @@ function createSnapshot(): SyncedEpisode {
     lastRoll: state.lastRoll,
     lastRollEvent: state.lastRollEvent,
     isRollPending: state.isRollPending,
+    // Пауза, повтор и перемотка видео: без этого проектор играл бы сам по себе.
+    videoPlayback: state.videoPlayback,
   }
 }
 
@@ -131,11 +135,19 @@ let pendingRollResult: RollResultMessage | null = null
  * Сокет может быть ещё не открыт (перезагрузка страницы, переподключение) —
  * тогда результат ждёт в буфере и уходит при первом же `onopen`. Иначе Мастер
  * остался бы без физики и показал локальную оценку со знаком «≈».
+ *
+ * `estimated` — физика не уложилась в сторожевой таймер: значения случайные,
+ * и Мастер обязан показать их со знаком «≈», а не как честный бросок кубиков.
  */
-export function postRollResult(eventId: number, dice: RollDie[], sum: number) {
+export function postRollResult(
+  eventId: number,
+  dice: RollDie[],
+  sum: number,
+  estimated = false
+) {
   const message: RollResultMessage = {
     type: "roll-result",
-    payload: { eventId, dice, sum },
+    payload: { eventId, dice, sum, ...(estimated ? { estimated: true } : {}) },
   }
   if (!sendRaw(message)) {
     pendingRollResult = message
@@ -273,7 +285,11 @@ function handleMessage(raw: string) {
     if (import.meta.env.DEV) {
       console.debug(`[episodeSync] физика с /screen: ${message.payload.sum}`)
     }
-    state.completeDiceRoll(message.payload.dice, message.payload.sum)
+    state.completeDiceRoll(
+      message.payload.dice,
+      message.payload.sum,
+      message.payload.estimated === true
+    )
   }
 }
 

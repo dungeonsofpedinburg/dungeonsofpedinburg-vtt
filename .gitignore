@@ -15,6 +15,17 @@ dist-ssr
 # Ассеты 3D-кубиков копирует postinstall @3d-dice/dice-box
 public/assets
 
+# Игнорировать пользовательские медиафайлы выпуска: сцены, персонажи, музыка,
+# предметы, саундпад и видео грузятся из панели Мастера и весят сотни мегабайт —
+# в репозиторий они не нужны. Пустая структура папок держится файлами .gitkeep.
+assets/scenes/*
+assets/characters/*
+assets/music/*
+assets/equipment/*
+assets/soundpad/*
+assets/videos/*
+!assets/**/.gitkeep
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

@@ -57,10 +57,14 @@ import {
   parseEpisodeFile,
   readEpisodeFile,
 } from "@/lib/episode-io"
+import { describeAssetIssues } from "@/lib/export-episode"
 import { useEpisodeStore } from "@/store/useEpisodeStore"
 
 /** Вкладки правой панели: этот же порядок соответствует клавишам 1–4. */
 const TAB_IDS = ["scenes", "sound", "map", "dice"]
+
+/** Сколько имён выгруженных файлов показывать в диалоге экспорта. */
+const EXPORT_ASSET_LIST_LIMIT = 5
 
 export function MasterPanel() {
   // Эта вкладка — источник истины, состояние рассылается на /screen.
@@ -79,7 +83,14 @@ export function MasterPanel() {
   const [isResetOpen, setIsResetOpen] = useState(false)
   const [isCreateOpen, setIsCreateOpen] = useState(false)
   const [activeTab, setActiveTab] = useState(TAB_IDS[0])
-  const [importError, setImportError] = useState<string | null>(null)
+  /**
+   * Сообщение о работе с файлом выпуска: ошибка импорта/экспорта или памятка о
+   * том, что папку `assets` нужно передать вместе с JSON (тогда она одна на оба окна).
+   */
+  const [fileDialog, setFileDialog] = useState<{
+    title: string
+    message: string
+  } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Клавиши 1–4 переключают вкладки: setActiveTab стабилен, слушатель один.
@@ -111,11 +122,51 @@ export function MasterPanel() {
       const text = await readEpisodeFile(file)
       importEpisode(parseEpisodeFile(text))
     } catch (thrown) {
-      setImportError(
-        thrown instanceof Error
-          ? thrown.message
-          : "Не удалось импортировать выпуск"
-      )
+      setFileDialog({
+        title: "Не удалось импортировать выпуск",
+        message:
+          thrown instanceof Error
+            ? thrown.message
+            : "Не удалось импортировать выпуск",
+      })
+    }
+  }
+
+  /**
+   * Экспорт выпуска. Картинки и музыка сначала ложатся файлами в корневую папку
+   * `assets` (их кладёт локальный сервер), поэтому JSON весит килобайты и несёт
+   * только относительные пути `/assets/...`.
+   */
+  async function handleExport() {
+    try {
+      const report = await downloadEpisodeFile()
+      const issues =
+        report.issues.length > 0
+          ? ` Без ассета остались: ${describeAssetIssues(report.issues)}.`
+          : ""
+      // Ничего не выгружали и ничего не потеряли — молчим, файл уже скачан.
+      if (report.savedAssets.length === 0 && report.issues.length === 0) return
+      // Имён файлов может быть много: в диалоге показываем первые пять.
+      const shown = report.savedAssets.slice(0, EXPORT_ASSET_LIST_LIMIT)
+      const rest = report.savedAssets.length - shown.length
+      const saved =
+        report.savedAssets.length > 0
+          ? ` Файлы выложены в папку assets (${report.savedAssets.length}): ` +
+            `${shown.join(", ")}${rest > 0 ? ` и ещё ${rest}` : ""}.` +
+            " Передайте JSON вместе с папкой assets — пути в нём относительные."
+          : ""
+      setFileDialog({
+        title: "Выпуск экспортирован",
+        message: `${report.fileName} — ${report.size}.${saved}${issues}`,
+      })
+    } catch (thrown) {
+      setFileDialog({
+        title: "Не удалось экспортировать выпуск",
+        message:
+          thrown instanceof Error
+            ? thrown.message
+            : "Не удалось экспортировать выпуск",
+      })
     }
   }
 
@@ -140,7 +191,7 @@ export function MasterPanel() {
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start" className="w-64">
-              <DropdownMenuItem onSelect={downloadEpisodeFile}>
+              <DropdownMenuItem onSelect={() => void handleExport()}>
                 <Download />
                 Экспортировать выпуск
               </DropdownMenuItem>
@@ -195,7 +246,7 @@ export function MasterPanel() {
           <div className="shrink-0">
             <TokenPanel
               mapId={tokenPanelMapId}
-              iconOnly
+              variant="icons"
               allowCategoryDrag={false}
               selectedCharacterId={activeCharacterId}
               onCreate={() => setIsCreateOpen(true)}
@@ -301,18 +352,18 @@ export function MasterPanel() {
       />
 
       <AlertDialog
-        open={Boolean(importError)}
+        open={Boolean(fileDialog)}
         onOpenChange={(open) => {
-          if (!open) setImportError(null)
+          if (!open) setFileDialog(null)
         }}
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Не удалось импортировать выпуск</AlertDialogTitle>
-            <AlertDialogDescription>{importError}</AlertDialogDescription>
+            <AlertDialogTitle>{fileDialog?.title}</AlertDialogTitle>
+            <AlertDialogDescription>{fileDialog?.message}</AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogAction onClick={() => setImportError(null)}>
+            <AlertDialogAction onClick={() => setFileDialog(null)}>
               Понятно
             </AlertDialogAction>
           </AlertDialogFooter>

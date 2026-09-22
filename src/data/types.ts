@@ -16,10 +16,16 @@ export type TokenCategory = "hero" | "npc" | "enemy" | "item"
 export type Background = {
   id: string
   title: string
-  /** Путь к изображению сцены (1920×880). Пустая строка — иконочный плейсхолдер. */
+  /** Путь к картинке или видео сцены (1920×880). Пустая строка — иконочный плейсхолдер. */
   src: string
   actGroup: ActGroup
   isBattlemap: boolean
+  /**
+   * Зацикливать видео-сцену (`.mp4`/`.webm`). Значения нет — значит «да»:
+   * у картинок настройка смысла не имеет, а файлы выпуска старого формата её
+   * просто не знают. Рубильник живёт в плеере Viewport Мастера.
+   */
+  isLoop?: boolean
 }
 
 export type Character = {
@@ -56,6 +62,23 @@ export type Track = {
   coverSrc: string
 }
 
+/**
+ * Слот саундпада: одноразовый звуковой эффект, который играет поверх музыки.
+ * Хранит только имя иконки (не React-компонент), поэтому уезжает в файл выпуска.
+ */
+export type SoundpadSlot = {
+  id: string
+  /** Короткое название под иконкой: «Взрыв», «Шаги» */
+  title: string
+  /** Имя иконки из lucide-react — строго из набора `SOUNDPAD_ICON_NAMES` */
+  icon: string
+  /**
+   * Путь к звуку: `/assets/...` в файле выпуска, data-URL — пока файл выбран
+   * в панели, но ещё не выгружен в папку `assets`. Пустая строка — звука нет.
+   */
+  src: string
+}
+
 export type DieSides = 4 | 6 | 8 | 10 | 12 | 20
 
 export type SceneNotes = Record<string, string>
@@ -89,6 +112,22 @@ export type DiceRollEvent = {
   dice: string[]
 }
 
+/**
+ * Живое состояние видео-фона: одно на оба окна. Пауза, повтор и перемотка идут
+ * через стор и уезжают на /screen снапшотом, иначе проектор продолжал бы играть
+ * «своё» видео и слушал только собственный плеер.
+ */
+export type VideoPlaybackState = {
+  /** Играет (true) или стоит на паузе */
+  isPlaying: boolean
+  /** Зациклено: кнопка повтора в плеере Мастера */
+  isLoop: boolean
+  /** Время перемотки в секундах */
+  seekTime: number
+  /** Метка события перемотки: изменилась — надо выставить currentTime */
+  seekId: number
+}
+
 /** Срез состояния, транслируемый на экран OBS (только сериализуемые данные). */
 export type SyncedEpisode = {
   backgrounds: Background[]
@@ -107,6 +146,8 @@ export type SyncedEpisode = {
   lastRollEvent: DiceRollEvent | null
   /** Ждём физику с /screen: на экране показывается подложка под кубики */
   isRollPending: boolean
+  /** Управление видео-фоном: пауза, повтор, перемотка — для обоих окон сразу */
+  videoPlayback: VideoPlaybackState
 }
 
 /** Данные выпуска для экспорта/импорта JSON. */
@@ -118,6 +159,8 @@ export type EpisodeFile = {
   sceneGroups?: string[]
   characters: Character[]
   tracks: Track[]
+  /** Слоты саундпада (нет в файлах старого формата — тогда пусто) */
+  soundpad?: SoundpadSlot[]
   mapTokens: MapToken[]
   sceneNotes: SceneNotes
   activeBackgroundId?: string

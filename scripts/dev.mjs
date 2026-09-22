@@ -1,6 +1,10 @@
 // Разработка в одном окне: Vite + локальный sync-сервер (порт 5174) в одном процессе.
-// Запуск: npm run dev:all (или npm run preview:all для собранной сборки).
+// Запуск: npm run dev (исторический псевдоним — npm run dev:all, он делает то же).
 // Ctrl+C останавливает оба процесса, потому что оба живут в этом дереве процессов.
+//
+// Важно: загрузка ассетов выпуска (POST /__pedinburg/assets) живёт внутри плагина
+// vite.config.ts, поэтому работает при любом запуске Vite — и через «npm run dev»,
+// и через start_windows.bat / start_mac.command.
 import { spawn } from "node:child_process"
 import { existsSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"

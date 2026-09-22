@@ -2,6 +2,18 @@ import { GRID_COLUMNS, GRID_ROWS } from "@/data/content"
 import { clampIndex, useEpisodeStore } from "@/store/useEpisodeStore"
 import { normalizeEpisodeAssets } from "@/lib/asset-url"
 import { initialsFromName } from "@/lib/character"
+import { normalizeSoundpadIcon, soundpadTitleFallback } from "@/lib/soundpad"
+import {
+  EPISODE_JSON_LIMIT_BYTES,
+  assertNoInlineAssets,
+  describeAssetIssues,
+  episodeJsonBytes,
+  episodeJsonText,
+  formatAssetSize,
+  persistEpisodeAssets,
+  sanitizeEpisodeForExport,
+  type AssetIssue,
+} from "@/lib/export-episode"
 import type {
   ActGroup,
   Background,
@@ -9,6 +21,7 @@ import type {
   EpisodeFile,
   MapToken,
   SceneNotes,
+  SoundpadSlot,
   TokenCategory,
   Track,
 } from "@/data/types"
@@ -16,11 +29,12 @@ import type {
 const TOKEN_CATEGORIES = ["hero", "npc", "enemy", "item"]
 
 /**
- * Снимок выпуска для экспорта в JSON. Пути к ассетам приводятся к относительным
- * URL от корня assets/ (`/assets/scenes/harbor.png`) — такой файл одинаково
- * читается на Windows и macOS, а картинки грузятся с того же хоста.
+ * Снимок выпуска «как есть»: состояние стора плюс приведение путей к
+ * относительным URL от корня assets/ (`/assets/scenes/harbor.png`). Встроенные
+ * ассеты (data-URL) на этом шаге ещё остаются: их выгружает в папку `assets/`
+ * экспорт — см. `exportEpisodeFile`.
  */
-export function buildEpisodeFile(): EpisodeFile {
+export function buildEpisodeSnapshot(): EpisodeFile {
   const state = useEpisodeStore.getState()
   return normalizeEpisodeAssets({
     exportedAt: new Date().toISOString(),
@@ -29,12 +43,94 @@ export function buildEpisodeFile(): EpisodeFile {
     sceneGroups: state.sceneGroups,
     characters: state.characters,
     tracks: state.tracks,
+    soundpad: state.soundpad,
     mapTokens: state.mapTokens,
     sceneNotes: state.sceneNotes,
     activeBackgroundId: state.activeBackgroundId,
     activeCharacterId: state.activeCharacterId,
     activeMapId: state.activeMapId,
   })
+}
+
+/**
+ * Снимок выпуска для файла: пути относительные (`/assets/...`), встроенных
+ * ассетов нет — в JSON уезжают только текст, разметка заметок, координаты
+ * токенов и килобайты путей. Синхронный: если картинки нужно ещё и выгрузить в
+ * папку `assets/`, берите `exportEpisodeFile()`.
+ */
+export function buildEpisodeFile(): EpisodeFile {
+  return sanitizeEpisodeForExport(buildEpisodeSnapshot()).file
+}
+
+/** Отчёт об экспорте: файл уже собран и готов к сохранению. */
+export type EpisodeExportReport = {
+  /** Имя файла выпуска: `pedinburg-Порт в тумане.json` */
+  fileName: string
+  /** Готовый JSON выпуска */
+  json: string
+  bytes: number
+  /** Размер в человекочитаемом виде: «412 КБ» */
+  size: string
+  /** Ассеты, выгруженные в корневую папку `assets/` при этом экспорте */
+  savedAssets: string[]
+  /** Поля, которые остались без ассета — с причиной (Base64, чужой путь) */
+  issues: AssetIssue[]
+}
+
+/**
+ * Полный экспорт выпуска по стандарту передачи: сначала встроенные ассеты ложатся
+ * файлами в корневую папку `assets/` (её передают вместе с JSON), затем
+ * собирается сам JSON — только относительные пути. Папку `assets/` на второй
+ * машине кладут в корень проекта, и пути `/assets/...` работают сразу.
+ */
+export async function exportEpisodeFile(): Promise<EpisodeExportReport> {
+  const {
+    file: persisted,
+    saved,
+    issues: uploadIssues,
+  } = await persistEpisodeAssets(buildEpisodeSnapshot())
+  const { file, issues: sanitizeIssues } = sanitizeEpisodeForExport(persisted)
+  // Поля ассетов уже очищены — это последняя страховка перед записью файла.
+  assertNoInlineAssets(file)
+
+  const json = episodeJsonText(file)
+  const bytes = episodeJsonBytes(json)
+  const issues = [...uploadIssues, ...sanitizeIssues]
+  if (bytes > EPISODE_JSON_LIMIT_BYTES) {
+    console.warn(
+      `[выпуск] JSON весит ${formatAssetSize(bytes)} — это больше предела ${formatAssetSize(EPISODE_JSON_LIMIT_BYTES)}`
+    )
+  }
+  if (issues.length > 0) {
+    console.warn(`[выпуск] поля без ассета: ${describeAssetIssues(issues)}`)
+  }
+
+  return {
+    fileName: episodeFileName(file.campaign ?? ""),
+    json,
+    bytes,
+    size: formatAssetSize(bytes),
+    savedAssets: saved,
+    issues,
+  }
+}
+
+/**
+ * Экспорт выпуска по кнопке: собирает файл (см. `exportEpisodeFile`) и отдаёт его
+ * браузеру на скачивание. Папку `assets/` Мастер передаёт вместе с JSON — она
+ * лежит в корне проекта, поэтому относительные пути в файле уже рабочие.
+ */
+export async function downloadEpisodeFile() {
+  const report = await exportEpisodeFile()
+  const blob = new Blob([report.json], { type: "application/json" })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement("a")
+  link.href = url
+  link.download = report.fileName
+  link.click()
+  URL.revokeObjectURL(url)
+  console.info(`[выпуск] ${report.fileName} — ${report.size}`)
+  return report
 }
 
 /**
@@ -63,18 +159,6 @@ function sanitizeFileNamePart(value: string) {
   return clean.replace(/\s+/g, " ").trim().slice(0, 80).replace(/[. ]+$/, "")
 }
 
-export function downloadEpisodeFile() {
-  const file = buildEpisodeFile()
-  const json = JSON.stringify(file, null, 2)
-  const blob = new Blob([json], { type: "application/json" })
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement("a")
-  link.href = url
-  link.download = episodeFileName(file.campaign ?? "")
-  link.click()
-  URL.revokeObjectURL(url)
-}
-
 /**
  * Разбор и валидация JSON выпуска. Бросает Error с понятным текстом,
  * если файл не подходит — диалог показывает сообщение пользователю.
@@ -101,6 +185,7 @@ export function parseEpisodeFile(text: string): EpisodeFile {
     sceneGroups: parseSceneGroups(parsed.sceneGroups, backgrounds),
     characters: parseCharacters(parsed.characters),
     tracks: parseTracks(parsed.tracks),
+    soundpad: parseSoundpad(parsed.soundpad),
     mapTokens: parseTokens(parsed.mapTokens, fallbackMapId),
     sceneNotes: parseSceneNotes(parsed.sceneNotes),
     campaign: asOptionalString(parsed.campaign) ?? undefined,
@@ -186,6 +271,8 @@ function parseBackgrounds(value: unknown): Background[] {
     src: asString(item.src),
     actGroup: asActGroup(item.actGroup),
     isBattlemap: item.isBattlemap === true,
+    // Зацикливание видео-сцены: в файлах старого формата поля нет — значит «да».
+    isLoop: item.isLoop !== false,
   }))
 }
 
@@ -230,6 +317,24 @@ function parseTracks(value: unknown): Track[] {
       tag: asString(item.tag, "Прочее"),
       audioSrc: asString(item.audioSrc),
       coverSrc: asString(item.coverSrc),
+    }))
+}
+
+/**
+ * Слоты саундпада из файла выпуска. Имя иконки проверяется по разрешённому
+ * набору: чужая строка не должна превратиться в «пустую» плитку в панели.
+ * Старые файлы поля не знают — тогда саундпад остаётся пустым.
+ */
+function parseSoundpad(value: unknown): SoundpadSlot[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .filter(isRecord)
+    .slice(0, 48)
+    .map((item, index) => ({
+      id: asString(item.id) || `sfx-import-${index}`,
+      title: asString(item.title) || soundpadTitleFallback(index),
+      icon: normalizeSoundpadIcon(item.icon),
+      src: asString(item.src),
     }))
 }
 

@@ -1,12 +1,16 @@
 import { useEffect, useRef, useState } from "react"
 import DiceBox from "@3d-dice/dice-box"
+import type { DiceBoxRollResult } from "@3d-dice/dice-box"
 import {
   DICE_PHYSICS,
   DICE_REFERENCE_GEOMETRY,
+  DICE_ROLL_WATCHDOG_MS,
   DICE_THEME_COLOR,
   ROLL_RESULT_TEXT,
   SCREEN_ROOT_FONT_REFERENCE_PX,
   diceScaleForCount,
+  diceSum,
+  estimateDiceRoll,
   formatRollBreakdown,
   isDiceResultValid,
   notationToSides,
@@ -26,12 +30,16 @@ const DICE_BOX_SELECTOR = `#${DICE_BOX_ID}`
 /** Стартовый размер: средний пул. Первый бросок всё равно выставит свой. */
 const INITIAL_DICE_SCALE = diceScaleForCount(3)
 
+/** Событие потери WebGL-контекста: браузер шлёт его, когда GPU сбрасывает контекст. */
+const CONTEXT_LOST_EVENT = "webglcontextlost"
+
 /**
- * Страховка от «зависшей» физики: если библиотека не отдала результат, отпускаем
- * очередь бросков, чтобы следующий клик сработал. Дольше ждать незачем — Мастер
- * к этому моменту уже показал локальную оценку со знаком «≈».
+ * Пауза перед применением нового размера подложки. Перетаскивание сплиттера
+ * рождает десятки срабатываний ResizeObserver, а каждое обращение к
+ * `resizeWorld()` добавляет в библиотеке новый слушатель `window.resize` —
+ * поэтому собираем поток кадров в один проход (см. `applyGeometry`).
  */
-const ROLL_RESULT_TIMEOUT_MS = 10000
+const RESIZE_SETTLE_MS = 250
 
 /** Прямоугольник подложки: канвас бросается ровно в тех же пикселях. */
 function measureGeometry(container: HTMLElement | null): DiceGeometry {
@@ -50,60 +58,186 @@ function currentRootFontPx() {
     : screenRootFontPx(window.innerWidth)
 }
 
-/** Промис с таймаутом: результат физики не должен держать очередь вечно. */
-function waitWithTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(
-      () => reject(new Error(`физика не отдала результат за ${ms} мс`)),
-      ms
-    )
-    promise.then(
-      (value) => {
-        clearTimeout(timer)
-        resolve(value)
-      },
-      (error: unknown) => {
-        clearTimeout(timer)
-        reject(error)
-      }
-    )
-  })
+/**
+ * Состояние движка кубиков. Инстанс создаётся один раз на страницу (StrictMode и
+ * HMR пересоздают компонент, а канвас и мир физики должны остаться теми же), но
+ * движок может «заболеть»: теряется контекст WebGL, инициализация падает, бросок
+ * перестаёт отдавать результат. Тогда флаг `broken` отправляет инстанс на
+ * пересборку — её выполняет сторожевой таймер перед следующим броском.
+ */
+type DiceEngine = {
+  /** Инициализация текущего инстанса: ждём её перед броском */
+  ready: Promise<DiceBox>
+  /** Канвас этого инстанса: нужен для очистки DOM при пересборке */
+  canvas: HTMLCanvasElement | null
+  /** Размер кубиков, уже отправленный инстансу (null — размер не синхронизирован) */
+  scale: number | null
+  /** Контекст потерян или физика зависла — инстанс больше не используем */
+  broken: boolean
+}
+
+let engine: DiceEngine | null = null
+
+/** Канвас, который dice-box создал внутри контейнера (`class="dice-box-canvas"`). */
+function findDiceCanvas() {
+  const container =
+    typeof document === "undefined"
+      ? null
+      : document.querySelector(DICE_BOX_SELECTOR)
+  const canvases = container?.querySelectorAll<HTMLCanvasElement>(".dice-box-canvas")
+  return canvases && canvases.length > 0 ? canvases[canvases.length - 1] : null
 }
 
 /**
- * Экземпляр DiceBox создаётся один раз на страницу: StrictMode и HMR
- * пересоздают компонент, а канвас и мир физики должны остаться теми же.
+ * Живой ли движок. Контекст WebGL намеренно НЕ проверяем через
+ * `canvas.getContext()`: библиотека сама создаёт контекст с нужными флагами, а наш
+ * вызов с другими опциями вернул бы уже существующий контекст и сломал рендер.
+ * Потерю контекста отслеживает слушатель `webglcontextlost`, а ошибки
+ * инициализации — состояние промиса `ready`.
  */
-let diceBoxPromise: Promise<DiceBox> | null = null
+function isEngineHealthy(entry: DiceEngine | null): entry is DiceEngine {
+  return Boolean(entry && !entry.broken)
+}
 
-function getDiceBox() {
-  if (!diceBoxPromise) {
-    diceBoxPromise = (async () => {
-      // Актуальный API 1.1.3: один объект конфигурации, контейнер — в `container`.
-      const diceBox = new DiceBox({
-        container: DICE_BOX_SELECTOR,
-        // Ассеты ammo.wasm и тема темы грузятся с CDN; локальная копия лежит в public/assets.
-        assetPath: "assets/",
-        origin: "https://unpkg.com/@3d-dice/dice-box@1.1.3/dist/",
-        theme: "default",
-        themeColor: DICE_THEME_COLOR,
-        // Обычный канвас вместо OffscreenCanvas: кубики надёжно видны в OBS.
-        offscreen: false,
-        scale: INITIAL_DICE_SCALE,
-        enableShadows: true,
-        // Вес и «бросок»: сырые ключи всегда в конфиге, иначе updateConfig({scale})
-        // перенормализует их повторно и кубики теряют вес (см. DICE_PHYSICS).
-        ...DICE_PHYSICS,
-      })
-      await diceBox.init()
-      return diceBox
-    })().catch((error: unknown) => {
-      // Не оставляем «сломанный» промис: следующий бросок попробует снова.
-      diceBoxPromise = null
-      throw error
+/**
+ * Гасит инстанс: канвас убираем из DOM, мир физики освобождаем, ссылку теряем —
+ * следующий бросок поднимет движок с нуля.
+ *
+ * Своего `destroy()` у dice-box 1.1.3 нет, а потерявший контекст канвас всё равно
+ * не оживёт, поэтому пересборка — единственный способ получить рабочую сцену:
+ * новый инстанс создаст свой канвас в том же контейнере.
+ */
+function resetDiceEngine(reason: string) {
+  const current = engine
+  engine = null
+  if (!current) return
+  current.broken = true
+  console.warn(`[Dice] ${reason}. Пересобираем движок кубиков.`)
+  // Мир физики держит тела Ammo: `clear()` велит воркеру освободить сцену,
+  // иначе они копятся от броска к броску.
+  current.ready
+    .then((diceBox) => {
+      try {
+        diceBox.clear()
+      } catch (error) {
+        console.debug("[Dice] сцену мёртвого инстанса уже не почистить", error)
+      }
     })
+    .catch(() => {})
+  if (current.canvas) {
+    current.canvas.removeEventListener(CONTEXT_LOST_EVENT, onContextLost, false)
+    // Мёртвый канвас остаётся в контейнере — новый инстанс создаст свой.
+    current.canvas.remove()
   }
-  return diceBoxPromise
+}
+
+/**
+ * Перехват потери WebGL-контекста. `preventDefault()` сообщает браузеру, что
+ * восстановлением занимаемся сами: старый инстанс всё равно не оживёт, поэтому
+ * выбрасываем его и сразу поднимаем движок заново.
+ */
+function onContextLost(event: Event) {
+  event.preventDefault()
+  console.warn("[Dice] WebGL context lost. Восстанавливаем движок…")
+  resetDiceEngine("потерян WebGL-контекст")
+  // Скрытая вкладка (уснувший проектор) может не дать контекст: тогда пересборку
+  // отложит сторожевой таймер — он сработает перед следующим броском.
+  if (typeof document !== "undefined" && document.visibilityState === "hidden") return
+  void acquireDiceEngine().catch((error: unknown) => {
+    console.warn("[Dice] пересоздать движок сразу не удалось", error)
+  })
+}
+
+/** Создаёт и инициализирует новый инстанс (старый к этому моменту уже выброшен). */
+function createDiceEngine(): DiceEngine {
+  // Актуальный API 1.1.3: один объект конфигурации, контейнер — в `container`.
+  const diceBox = new DiceBox({
+    container: DICE_BOX_SELECTOR,
+    // Ассеты ammo.wasm и тема темы грузятся с CDN; локальная копия лежит в public/assets.
+    assetPath: "assets/",
+    origin: "https://unpkg.com/@3d-dice/dice-box@1.1.3/dist/",
+    theme: "default",
+    themeColor: DICE_THEME_COLOR,
+    // Обычный канвас вместо OffscreenCanvas: кубики надёжно видны в OBS.
+    offscreen: false,
+    scale: INITIAL_DICE_SCALE,
+    enableShadows: true,
+    // Вес и «бросок»: сырые ключи всегда в конфиге, иначе updateConfig({scale})
+    // перенормализует их повторно и кубики теряют вес (см. DICE_PHYSICS).
+    ...DICE_PHYSICS,
+  })
+  const entry: DiceEngine = {
+    // Заглушка: настоящий промис встанет синхронно, до первого await снаружи.
+    ready: Promise.resolve(diceBox),
+    canvas: findDiceCanvas(),
+    // Размер синхронизируем явно перед первым броском: он зависит от подложки.
+    scale: null,
+    broken: false,
+  }
+  // Канвас конструктор создаёт синхронно, поэтому слушатель стоит до первого броска.
+  entry.canvas?.addEventListener(CONTEXT_LOST_EVENT, onContextLost, false)
+  engine = entry
+  entry.ready = diceBox.init().then(
+    () => diceBox,
+    (error: unknown) => {
+      // «Сломанный» промис не держим: следующий бросок попробует снова.
+      if (engine === entry) resetDiceEngine("инициализация кубиков не удалась")
+      throw error
+    }
+  )
+  return entry
+}
+
+/**
+ * Сторожевой таймер перед броском: живой движок отдаём как есть, а сломанный
+ * (потерянный контекст, ошибка инициализации, зависшая физика) пересобираем
+ * ЧИСТО до того, как кинуть кубики. Возвращаем запись движка: вызывающему нужны
+ * и `scale`, и `canvas`.
+ */
+async function acquireDiceEngine() {
+  if (engine && !isEngineHealthy(engine)) {
+    resetDiceEngine("предыдущий инстанс нездоров")
+  }
+  const entry = engine ?? createDiceEngine()
+  await entry.ready
+  return entry
+}
+
+/** Живой движок без создания нового: для очистки сцены и пересчёта размера. */
+function currentEngine() {
+  return isEngineHealthy(engine) ? engine : null
+}
+
+/**
+ * Бросок со сторожевым таймером `DICE_ROLL_WATCHDOG_MS`.
+ * `null` — физика не ответила (или бросок упал): инстанс считаем зависшим, сцену
+ * гасим, а Мастеру уходит оценка со знаком «≈», чтобы интерфейс не замер.
+ */
+function rollWithWatchdog(diceBox: DiceBox, notation: string[]) {
+  return new Promise<DiceBoxRollResult[] | null>((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let settled = false
+    const finish = (results: DiceBoxRollResult[] | null) => {
+      if (settled) return
+      settled = true
+      if (timer !== null) clearTimeout(timer)
+      resolve(results)
+    }
+    timer = setTimeout(() => {
+      timer = null
+      console.warn(
+        `[Dice] физика не отдала результат за ${DICE_ROLL_WATCHDOG_MS} мс — движок пересоберём`
+      )
+      finish(null)
+    }, DICE_ROLL_WATCHDOG_MS)
+    diceBox.roll(notation).then(
+      (results) => finish(results),
+      (error: unknown) => {
+        console.error("[Dice] бросок не удался", error)
+        finish(null)
+      }
+    )
+  })
 }
 
 /**
@@ -124,8 +258,6 @@ export function DiceOverlay() {
   const containerRef = useRef<HTMLDivElement>(null)
   const rolledEventIdRef = useRef<number | null>(null)
   const hadResultRef = useRef(false)
-  /** Размер, уже отправленный в движок: null — конфиг ещё не синхронизирован. */
-  const diceScaleRef = useRef<number | null>(null)
   /** Сколько кубиков было в последнем броске: размер пересчитываем при resize. */
   const lastPoolRef = useRef(3)
   /**
@@ -160,25 +292,35 @@ export function DiceOverlay() {
     rollChainRef.current = rollChainRef.current
       .catch(() => {})
       .then(async () => {
-        const diceBox = await getDiceBox()
+        // Сторожевой таймер: сломанный инстанс (потерянный контекст, ошибка,
+        // зависшая физика) пересобирается ДО броска — очередь не встанет.
+        const entry = await acquireDiceEngine()
+        const diceBox = await entry.ready
         if (rolledEventIdRef.current !== event.id) return
         // Размер подгоняем под количество кубиков: один d20 — почти во всю плашку.
         // updateConfig в dice-box перечитывает тему и метрики, поэтому зовём его
         // только когда размер пула реально изменился, а не перед каждым броском.
         const scale = diceScaleForCount(pool.length, measureGeometry(containerRef.current))
-        if (diceScaleRef.current !== scale) {
-          diceScaleRef.current = scale
+        // Размер живёт на инстансе: после пересборки он снова не синхронизирован.
+        if (entry.scale !== scale) {
+          entry.scale = scale
           await diceBox.updateConfig({ scale })
           if (rolledEventIdRef.current !== event.id) return
         }
         // Значения берём из результата ИМЕННО этого броска: глобальный
         // onRollComplete читает текущую группу и может подмешать чужой результат.
-        const results = await waitWithTimeout(
-          diceBox.roll(event.dice),
-          ROLL_RESULT_TIMEOUT_MS
-        )
+        const results = await rollWithWatchdog(diceBox, event.dice)
         // Пока кубики катились, мастер мог нажать новый бросок — старый не публикуем.
         if (rolledEventIdRef.current !== event.id) return
+        if (results === null) {
+          // Физика зависла или упала: сцену гасим (кубики исчезают — плашке они
+          // больше не противоречат), инстанс уходит на пересборку, а Мастер
+          // получает локальную оценку со знаком «≈» и не ждёт своего таймаута.
+          resetDiceEngine("физика не отдала результат")
+          const estimate = estimateDiceRoll(pool)
+          postRollResult(event.id, estimate, diceSum(estimate), true)
+          return
+        }
         const { dice, sum } = summarizeDiceResults(results)
         if (!isDiceResultValid(dice, pool)) {
           console.warn(
@@ -200,25 +342,49 @@ export function DiceOverlay() {
   useEffect(() => {
     const container = containerRef.current
     if (!container || typeof ResizeObserver === "undefined") return
-    const observer = new ResizeObserver(() => {
+    let settleTimer: ReturnType<typeof setTimeout> | null = null
+    /** Размер, для которого мир физики уже настроен: `ШxВ`, пустая строка — ещё нет. */
+    let worldSize = ""
+
+    const applyGeometry = () => {
+      settleTimer = null
       // Замер один на кубики и на полосу итога: оба зависят от размера подложки.
       const geometry = measureGeometry(container)
       setPlateWidthPx(geometry.plateWidthPx)
-      void getDiceBox()
+      // Движка может не быть (ещё не бросали) или он сломан — пересоберётся на броске.
+      const entry = currentEngine()
+      if (!entry) return
+      const size = `${geometry.plateWidthPx}x${geometry.plateHeightPx}`
+      // `resizeWorld()` каждый раз добавляет в библиотеке новый слушатель
+      // `window.resize`, поэтому зовём его только когда размер реально изменился.
+      const needsResize = size !== worldSize
+      worldSize = size
+      void entry.ready
         .then(async (diceBox) => {
-          diceBox.resizeWorld()
+          if (needsResize) diceBox.resizeWorld()
           const scale = diceScaleForCount(lastPoolRef.current, geometry)
-          if (diceScaleRef.current === scale) return
-          diceScaleRef.current = scale
+          if (entry.scale === scale) return
+          entry.scale = scale
           await diceBox.updateConfig({ scale })
         })
         .catch(() => {})
+    }
+
+    const observer = new ResizeObserver(() => {
+      // Перетаскивание даёт десятки кадров: собираем их в один проход.
+      if (settleTimer !== null) clearTimeout(settleTimer)
+      settleTimer = setTimeout(applyGeometry, RESIZE_SETTLE_MS)
     })
     observer.observe(container)
-    return () => observer.disconnect()
+    return () => {
+      observer.disconnect()
+      if (settleTimer !== null) clearTimeout(settleTimer)
+    }
   }, [])
 
-  // Плашка с итогом погасла (через ROLL_PLAQUE_MS) — убираем кубики со сцены.
+  // Плашка с итогом погасла (через ROLL_PLAQUE_MS) — чистим сцену целиком, а не
+  // просто скрываем канвас: `clear()` снимает кубики и велит воркеру физики
+  // освободить тела Ammo, иначе мир копит их от броска к броску.
   // Если в этот момент летит новый бросок, сцену не трогаем: clear() оборвал бы
   // чужие кубики и сбросил счётчики rollId, а свой clear сделает сам roll().
   useEffect(() => {
@@ -229,9 +395,14 @@ export function DiceOverlay() {
     if (!hadResultRef.current) return
     if (isRollPending) return
     hadResultRef.current = false
-    void getDiceBox()
+    // `currentEngine` не создаёт движок: чистить нечего, если его нет.
+    const entry = currentEngine()
+    if (!entry) return
+    void entry.ready
       .then((diceBox) => diceBox.clear())
-      .catch(() => {})
+      .catch((error: unknown) => {
+        console.debug("[Dice] сцену уже не почистить", error)
+      })
   }, [lastRoll, isRollPending])
 
   return (

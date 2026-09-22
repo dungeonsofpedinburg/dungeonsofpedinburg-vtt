@@ -7,9 +7,16 @@ import {
   gridCellPercent,
   gridGeometry,
   gridOffsetPercent,
+  tokenCategories,
 } from "@/data/content"
 import { resolveCellFromPoint } from "@/hooks/useGridDrop"
-import { categoryBorders } from "@/components/master-panel/tokenAppearance"
+import {
+  categoryBorders,
+  compactTokenBorders,
+  TOKEN_COLUMN_ATTRIBUTE,
+  tokenCategoryAtPoint,
+} from "@/components/master-panel/tokenAppearance"
+import { soundpadIcons } from "@/components/master-panel/soundpadIcons"
 import {
   crossfadeLevels,
   isCrossfadeFinished,
@@ -17,12 +24,13 @@ import {
 } from "@/lib/audio-crossfade"
 import { fileNameWithoutExtension } from "@/lib/utils"
 import { readMp3Tags } from "@/lib/audio-file"
-import type { SyncedEpisode } from "@/data/types"
+import type { EpisodeFile, SyncedEpisode } from "@/data/types"
 import {
   DICE_DEFAULT_RAW_MASS,
   DICE_DEFAULT_RAW_THROWFORCE,
   DICE_PHYSICS,
   DICE_REFERENCE_GEOMETRY,
+  DICE_ROLL_WATCHDOG_MS,
   DICE_WIDTH_PERCENT,
   ROLL_PLAQUE_MS,
   ROLL_RESULT_TEXT,
@@ -36,7 +44,9 @@ import {
   SCREEN_ROOT_FONT_VW,
   buildDiceNotation,
   diceScaleForCount,
+  diceSum,
   diceThrowSpeedFactor,
+  estimateDiceRoll,
   formatRollBreakdown,
   internalDiceMass,
   isDiceResultValid,
@@ -52,8 +62,39 @@ import {
   episodeFileName,
   parseEpisodeFile,
 } from "@/lib/episode-io"
-import { toAssetUrl } from "@/lib/asset-url"
-import { MAX_DICE_PER_TYPE, useEpisodeStore } from "@/store/useEpisodeStore"
+import {
+  EPISODE_JSON_LIMIT_BYTES,
+  assertNoInlineAssets,
+  episodeAssetFields,
+  episodeJsonBytes,
+  findInlineAssetLeak,
+  formatAssetSize,
+  sanitizeEpisodeForExport,
+} from "@/lib/export-episode"
+import {
+  assetFileName,
+  extensionFromDataUrl,
+  isInlineAsset,
+  isSystemPath,
+  slugifyAssetName,
+  toAssetUrl,
+} from "@/lib/asset-url"
+import {
+  DEFAULT_SOUNDPAD_ICON,
+  SOUNDPAD_ICON_NAMES,
+  isSoundpadIconName,
+} from "@/lib/soundpad"
+import { activeSfxCount, playSfx } from "@/lib/sfx-player"
+import {
+  formatMediaTime,
+  isLoopEnabled,
+  isVideoFile,
+  isVideoSrc,
+  nextSeekId,
+  shouldSeekVideo,
+} from "@/lib/media"
+import { isTextEntryTarget } from "@/hooks/useBatchSelection"
+import { useEpisodeStore, MAX_DICE_PER_TYPE } from "@/store/useEpisodeStore"
 import {
   getSyncInfo,
   getSyncStatus,
@@ -407,6 +448,8 @@ const remoteState: SyncedEpisode = {
   lastRoll: null,
   lastRollEvent: { id: 7, dice: ["1d20"] },
   isRollPending: true,
+  // Команды плеера Мастера: экран обязан их применить (пауза, повтор, перемотка).
+  videoPlayback: { isPlaying: false, isLoop: false, seekTime: 42, seekId: 1234 },
 }
 raw.send({ type: "state", payload: remoteState })
 
@@ -426,7 +469,12 @@ check(
       follower.stagePhase === "entering" &&
       follower.lastRoll === null &&
       follower.lastRollEvent?.id === 7 &&
-      follower.isRollPending === true
+      follower.isRollPending === true &&
+      // Пауза, повтор и перемотка видео доехали до экрана.
+      follower.videoPlayback.isPlaying === false &&
+      follower.videoPlayback.isLoop === false &&
+      follower.videoPlayback.seekTime === 42 &&
+      follower.videoPlayback.seekId === 1234
     )
   }),
   `${store().activeBackgroundId} / ${store().stagePhase}`
@@ -719,10 +767,11 @@ check(
 
 store().importEpisode(parseEpisodeFile(JSON.stringify(buildEpisodeFile())))
 check(
-  "трек с аудио выживает экспорт/импорт",
+  "встроенное аудио не едет в файл выпуска",
   store().tracks.some(
-    (track) => track.audioSrc === "data:audio/mpeg;base64,AAAA"
-  )
+    (track) => track.id === createdTrackId && track.audioSrc === ""
+  ),
+  store().tracks.find((track) => track.id === createdTrackId)?.audioSrc
 )
 
 store().removeTrack(createdTrackId)
@@ -843,6 +892,21 @@ check(
     categoryBorders.enemy.selected === "border-red-500" &&
     categoryBorders.item.base === "border-amber-700" &&
     categoryBorders.item.selected === "border-amber-400"
+)
+
+check(
+  "компактный токен: рамка = цвет категории из макета",
+  compactTokenBorders.hero === "border-zinc-100" &&
+    compactTokenBorders.npc === "border-zinc-500" &&
+    compactTokenBorders.enemy === "border-red-500" &&
+    compactTokenBorders.item === "border-amber-400" &&
+    tokenCategories.every((category) => Boolean(compactTokenBorders[category]))
+)
+check(
+  "колонка категорий находится по атрибуту, вне браузера — null",
+  TOKEN_COLUMN_ATTRIBUTE === "data-token-category" &&
+    // В Node DOM нет: жест не должен падать, а просто ничего не менять.
+    tokenCategoryAtPoint(10, 10) === null
 )
 
 store().resetEpisode()
@@ -1199,11 +1263,11 @@ const coverTrackId = store().addTrack({
 })
 store().importEpisode(parseEpisodeFile(JSON.stringify(buildEpisodeFile())))
 check(
-  "обложка трека выживает экспорт/импорт",
+  "обложка-инлайн не едет в файл выпуска",
   store().tracks.some(
-    (track) =>
-      track.id === coverTrackId && track.coverSrc === "data:image/png;base64,CCCC"
-  )
+    (track) => track.id === coverTrackId && track.coverSrc === ""
+  ),
+  store().tracks.find((track) => track.id === coverTrackId)?.coverSrc
 )
 
 // --- Фаза 14: состояние кнопки броска, размер и физика кубиков ---
@@ -2076,6 +2140,584 @@ try {
   bomAccepted = false
 }
 check("JSON с BOM (сохранён Блокнотом Windows) читается", bomAccepted)
+
+// --- Фаза 18: вес файла выпуска (запрет Base64) и сторожевой таймер кубиков ---
+// Встроенные ассеты: именно они раньше превращали файл выпуска в 100 МБ Base64.
+const INLINE_IMAGE = `data:image/webp;base64,${"A".repeat(64)}`
+const INLINE_AUDIO = `data:audio/mpeg;base64,${"B".repeat(64)}`
+store().resetEpisode()
+const heavySceneId = store().addBackground("Интермедия", {
+  title: "Сцена с картинкой",
+  src: INLINE_IMAGE,
+  activate: false,
+})
+store().updateCharacterImage(store().characters[0].id, {
+  avatarSrc: INLINE_IMAGE,
+  fullBodyPngSrc: INLINE_IMAGE,
+})
+const heavyTrackId = store().addTrack({
+  title: "Трек с файлом",
+  artist: "QA",
+  duration: "1:00",
+  tag: "Тест",
+  audioSrc: INLINE_AUDIO,
+  coverSrc: INLINE_IMAGE,
+})
+const heavySfxId = store().addSoundpadSlot({
+  title: "Взрыв",
+  icon: "Bomb",
+  src: INLINE_AUDIO,
+})
+
+const heavyEpisode = buildEpisodeFile()
+const heavyJson = JSON.stringify(heavyEpisode)
+const heavyBytes = episodeJsonBytes(JSON.stringify(heavyEpisode, null, 2))
+check(
+  "в JSON выпуска нет подстрок data:image и data:audio",
+  !heavyJson.includes("data:image") &&
+    !heavyJson.includes("data:audio") &&
+    !heavyJson.includes("data:")
+)
+const heavyTrack = heavyEpisode.tracks.find((item) => item.id === heavyTrackId)
+const heavySfx = (heavyEpisode.soundpad ?? []).find(
+  (slot) => slot.id === heavySfxId
+)
+check(
+  "вместо встроенной картинки в JSON остаётся пустое поле",
+  heavyEpisode.backgrounds.find((item) => item.id === heavySceneId)?.src === "" &&
+    heavyTrack?.audioSrc === "" &&
+    heavyTrack?.coverSrc === "" &&
+    heavySfx?.src === "" &&
+    heavyEpisode.characters[0].avatarSrc === ""
+)
+check(
+  "JSON выпуска со сценами, персонажами и заметками весит меньше 500 КБ",
+  heavyBytes < EPISODE_JSON_LIMIT_BYTES,
+  formatAssetSize(heavyBytes)
+)
+check("страховка экспорта не находит грязных полей", findInlineAssetLeak(heavyEpisode) === null)
+check(
+  "перечислены все поля-ассеты выпуска",
+  episodeAssetFields(heavyEpisode).length ===
+    heavyEpisode.backgrounds.length +
+      heavyEpisode.characters.length * 2 +
+      heavyEpisode.tracks.length * 2 +
+      (heavyEpisode.soundpad?.length ?? 0)
+)
+
+// Грязный файл: Base64, blob-ссылка и чужие системные пути в одном наборе.
+const dirtyFile: EpisodeFile = {
+  backgrounds: [
+    {
+      id: "bg-dirty",
+      title: "Грязная сцена",
+      src: INLINE_IMAGE,
+      actGroup: "Завязка",
+      isBattlemap: false,
+    },
+  ],
+  characters: [
+    {
+      id: "char-dirty",
+      name: "Алхимик",
+      role: "NPC",
+      initials: "А",
+      category: "npc",
+      avatarSrc: "C:\\proj\\assets\\characters\\алхимик_токен.png",
+      fullBodyPngSrc: "/Users/me/proj/art/алхимик.png",
+    },
+  ],
+  tracks: [
+    {
+      id: "track-dirty",
+      title: "Тема",
+      artist: "Автор",
+      duration: "1:00",
+      tag: "Прочее",
+      audioSrc: "blob:http://localhost/dead",
+      coverSrc: INLINE_IMAGE,
+    },
+  ],
+  mapTokens: [],
+  sceneNotes: {},
+}
+const dirtyResult = sanitizeEpisodeForExport(dirtyFile)
+check(
+  "sanitize вычищает Base64, blob и чужие пути, оставляя /assets/...",
+  dirtyResult.file.backgrounds[0].src === "" &&
+    dirtyResult.file.tracks[0].audioSrc === "" &&
+    dirtyResult.file.tracks[0].coverSrc === "" &&
+    dirtyResult.file.characters[0].fullBodyPngSrc === "" &&
+    dirtyResult.file.characters[0].avatarSrc ===
+      "/assets/characters/алхимик_токен.png",
+  dirtyResult.file.characters[0].avatarSrc
+)
+check(
+  "sanitize перечисляет причины по каждому выброшенному полю",
+  dirtyResult.issues
+    .map((issue) => `${issue.field}:${issue.reason}`)
+    .join(", ") ===
+    "backgrounds[0].src:inline, characters[0].fullBodyPngSrc:system-path, " +
+      "tracks[0].audioSrc:session-url, tracks[0].coverSrc:inline",
+  dirtyResult.issues.map((issue) => issue.reason).join(",")
+)
+
+let dirtyRejected = false
+try {
+  assertNoInlineAssets(dirtyFile)
+} catch {
+  dirtyRejected = true
+}
+check("запись файла с Base64 прерывается ошибкой", dirtyRejected)
+
+let cleanAccepted = false
+try {
+  assertNoInlineAssets(heavyEpisode)
+  cleanAccepted = true
+} catch {
+  cleanAccepted = false
+}
+check("чистый файл проходит страховку экспорта", cleanAccepted)
+
+check(
+  "имя файла ассета безопасно для Windows, macOS и URL",
+  assetFileName("bg-harbor", "Порт в тумане", "jpg") ===
+    "bg-harbor-порт-в-тумане.jpg" &&
+    assetFileName("char-1", "", "png") === "char-1.png" &&
+    assetFileName("track-1", "Тема «Бой»", "mp3") === "track-1-тема-бой.mp3" &&
+    !assetFileName("bg-1", "../Злой путь", "png").includes("/") &&
+    assetFileName("", "", "png") === "asset.png" &&
+    slugifyAssetName("Порт в тумане") === "порт-в-тумане" &&
+    slugifyAssetName("   ..   ") === "",
+  assetFileName("bg-harbor", "Порт в тумане", "jpg")
+)
+check(
+  "расширение файла берётся из MIME data-URL",
+  extensionFromDataUrl("data:image/webp;base64,AA") === "webp" &&
+    extensionFromDataUrl("data:audio/mpeg;base64,AA") === "mp3" &&
+    extensionFromDataUrl("data:application/octet-stream;base64,AA") === "bin" &&
+    extensionFromDataUrl("не data-url") === "bin"
+)
+check(
+  "системные пути и инлайн-ассеты распознаются",
+  isInlineAsset("data:image/png;base64,AA") &&
+    !isInlineAsset("/assets/scenes/x.png") &&
+    isSystemPath("D:\\proj\\assets\\x.png") &&
+    isSystemPath("file:///Users/me/x.png") &&
+    isSystemPath("/Users/me/art/x.png") &&
+    !isSystemPath("/assets/scenes/x.png") &&
+    !isSystemPath("https://cdn.example.com/x.png")
+)
+check(
+  "размер файла выпуска читается человеком",
+  formatAssetSize(2048) === "2.0 КБ" &&
+    formatAssetSize(300 * 1024) === "300 КБ" &&
+    formatAssetSize(2 * 1024 * 1024) === "2.0 МБ",
+  formatAssetSize(heavyBytes)
+)
+
+// Сторожевой таймер /screen обязан короче ожидания Мастера: иначе Мастер успел бы
+// показать свою оценку раньше, чем экран пересоберёт зависший движок.
+check(
+  "сторожевой таймер кубиков короче ожидания Мастера с экраном",
+  DICE_ROLL_WATCHDOG_MS > 0 && DICE_ROLL_WATCHDOG_MS < ROLL_WAIT_WITH_SCREEN_MS,
+  `${DICE_ROLL_WATCHDOG_MS} мс`
+)
+check(
+  "локальная оценка броска укладывается в грани кубиков",
+  estimateDiceRoll([20, 6, 6]).length === 3 &&
+    estimateDiceRoll([20, 6, 6]).every(
+      (die) => die.value >= 1 && die.value <= die.sides
+    ) &&
+    diceSum([
+      { sides: 20, value: 7 },
+      { sides: 6, value: 3 },
+    ]) === 10
+)
+
+// Флаг «≈» приезжает с /screen по сокету: физика не ответила, значения случайные.
+store().resetEpisode()
+store().triggerDiceRoll(["1d20"])
+store().completeDiceRoll([{ sides: 20, value: 7 }], 7, true)
+const forcedRoll = store().lastRoll
+check(
+  "флаг «≈» с /screen доезжает до плашки",
+  forcedRoll !== null &&
+    forcedRoll.estimated === true &&
+    formatRollBreakdown(forcedRoll.dice, forcedRoll.sum, forcedRoll.estimated).startsWith(
+      "≈"
+    ),
+  formatRollBreakdown(forcedRoll?.dice ?? [], forcedRoll?.sum ?? 0)
+)
+store().clearRoll()
+
+// --- Саундпад: слоты, экспорт выпуска и глобальный плеер эффектов ---
+store().resetEpisode()
+check("саундпад стартует пустым (плиток нет)", store().soundpad.length === 0)
+
+const sfxId = store().addSoundpadSlot({
+  title: "   ",
+  icon: "Bomb",
+  src: " data:audio/mpeg;base64,AAAA ",
+})
+const sfxSlot = store().soundpad.find((slot) => slot.id === sfxId)
+check(
+  "addSoundpadSlot: имя по умолчанию, путь обрезан, иконка проверена",
+  sfxSlot?.title === "Звук 1" &&
+    sfxSlot.icon === "Bomb" &&
+    sfxSlot.src === "data:audio/mpeg;base64,AAAA",
+  String(sfxSlot?.title)
+)
+
+const foreignIconId = store().addSoundpadSlot({
+  title: "Чужой",
+  icon: "NotAnIcon",
+  src: "/assets/soundpad/x.mp3",
+})
+check(
+  "незнакомая иконка заменяется на объявленную по умолчанию",
+  store().soundpad.find((slot) => slot.id === foreignIconId)?.icon ===
+    DEFAULT_SOUNDPAD_ICON
+)
+
+store().updateSoundpadSlot(sfxId, { title: "Гром", icon: "Zap" })
+const editedSfx = store().soundpad.find((slot) => slot.id === sfxId)
+check(
+  "updateSoundpadSlot меняет название и иконку",
+  editedSfx?.title === "Гром" && editedSfx.icon === "Zap"
+)
+
+// Экспорт/импорт: встроенный звук в JSON не попадает, слот остаётся без файла.
+store().importEpisode(parseEpisodeFile(JSON.stringify(buildEpisodeFile())))
+const sfxAfterImport = store().soundpad.find((slot) => slot.id === sfxId)
+check(
+  "встроенный звук саундпада не едет в файл выпуска",
+  sfxAfterImport?.title === "Гром" &&
+    sfxAfterImport?.icon === "Zap" &&
+    sfxAfterImport?.src === "",
+  String(sfxAfterImport?.src)
+)
+
+// Файл с чужой машины: пути ОС становятся /assets/..., чужие иконки — по умолчанию.
+store().importEpisode(
+  parseEpisodeFile(
+    JSON.stringify({
+      campaign: "Саундпад",
+      backgrounds: [
+        {
+          id: "bg-map",
+          title: "Карта",
+          src: "/placeholders/background-1.svg",
+          actGroup: "Завязка",
+          isBattlemap: true,
+        },
+      ],
+      characters: [],
+      tracks: [],
+      soundpad: [
+        {
+          id: "sfx-1",
+          title: "Шаги",
+          icon: "Ghost",
+          src: "C:\\proj\\assets\\soundpad\\steps.mp3",
+        },
+        {
+          title: "Из macOS",
+          icon: "Banana",
+          src: "/Users/me/proj/assets/soundpad/scream.mp3",
+        },
+      ],
+      mapTokens: [],
+      sceneNotes: {},
+    })
+  )
+)
+check(
+  "импорт саундпада: путь → /assets/..., чужая иконка → по умолчанию",
+  store().soundpad.length === 2 &&
+    store().soundpad[0].src === "/assets/soundpad/steps.mp3" &&
+    store().soundpad[0].icon === "Ghost" &&
+    store().soundpad[0].title === "Шаги" &&
+    store().soundpad[1].src === "/assets/soundpad/scream.mp3" &&
+    store().soundpad[1].icon === DEFAULT_SOUNDPAD_ICON,
+  store().soundpad[0]?.src
+)
+
+check(
+  "набор иконок саундпада: тематические и все есть в мапе lucide",
+  SOUNDPAD_ICON_NAMES.length >= 10 &&
+    new Set(SOUNDPAD_ICON_NAMES).size === SOUNDPAD_ICON_NAMES.length &&
+    SOUNDPAD_ICON_NAMES.every((name) => Boolean(soundpadIcons[name])) &&
+    isSoundpadIconName(SOUNDPAD_ICON_NAMES[0]) &&
+    !isSoundpadIconName("Banana") &&
+    (
+      [
+        "Swords",
+        "Skull",
+        "Flame",
+        "Zap",
+        "Sparkles",
+        "ShieldAlert",
+        "Volume2",
+        "Footprints",
+        "Bomb",
+        "HeartPulse",
+        "Ghost",
+        "DoorOpen",
+      ] as string[]
+    ).every((name) => (SOUNDPAD_ICON_NAMES as readonly string[]).includes(name)),
+  `${SOUNDPAD_ICON_NAMES.length} иконок`
+)
+check(
+  "плеер эффектов вне браузера молчит и не падает",
+  playSfx("") === false &&
+    playSfx("/assets/soundpad/x.mp3") === false &&
+    activeSfxCount() === 0
+)
+
+// --- Видео-сцены и множественное удаление ---
+check(
+  "видео определяется по расширению пути",
+  isVideoSrc("/assets/videos/intro.mp4") &&
+    isVideoSrc("/assets/scenes/clip.WEBM") &&
+    !isVideoSrc("/assets/scenes/forest.jpg") &&
+    !isVideoSrc("") &&
+    !isVideoSrc("/placeholders/background-1.svg")
+)
+check(
+  "видео-файл из проводника узнаётся по MIME и по имени",
+  isVideoFile({ type: "video/mp4", name: "clip" }) &&
+    isVideoFile({ type: "", name: "clip.webm" }) &&
+    !isVideoFile({ type: "image/png", name: "forest.png" })
+)
+check(
+  "зацикливание видео включено по умолчанию",
+  isLoopEnabled({}) &&
+    isLoopEnabled({ isLoop: true }) &&
+    !isLoopEnabled({ isLoop: false })
+)
+check(
+  "таймкод плеера: 00:14 / 01:30 / 1:01:30",
+  formatMediaTime(14) === "00:14" &&
+    formatMediaTime(90) === "01:30" &&
+    formatMediaTime(3690) === "1:01:30" &&
+    formatMediaTime(0) === "00:00" &&
+    formatMediaTime(Number.NaN) === "00:00",
+  formatMediaTime(90)
+)
+
+// Перемотка применяется только к заметно другой позиции: иначе текущий кадр
+// дёргался бы на каждой команде паузы в обоих окнах.
+/** Метка «из будущего»: проверяем рост счётчика рядом с тестом, детерминированно. */
+const farSeekId = 9_000_000_000_000
+check(
+  "порог перемотки 0.3 с: мелкие расхождения игнорируются",
+  shouldSeekVideo(0, 0) === false &&
+    shouldSeekVideo(41.9, 42) === false &&
+    shouldSeekVideo(41.5, 42) === true &&
+    shouldSeekVideo(0, 42) === true
+)
+check(
+  "метка события перемотки растёт даже внутри одной миллисекунды",
+  // Метка из «далёкого будущего» увеличивается ровно на единицу: так две команды
+  // в одну миллисекунду получают разные метки и обе доезжают до /screen.
+  nextSeekId(0) > 0 &&
+    nextSeekId(farSeekId) === farSeekId + 1 &&
+    nextSeekId(farSeekId) !== farSeekId,
+  String(nextSeekId(farSeekId))
+)
+
+// Защита клавиши Delete: в полях ввода и в заметках она удаляет текст, а не сцены.
+/** Фейковый узел для проверки защиты клавиш: в Node DOM нет. */
+const fakeTarget = (node: { tagName: string; isContentEditable?: boolean }) =>
+  node as unknown as EventTarget
+check(
+  "Delete не трогает элементы, когда пишут текст",
+  isTextEntryTarget(fakeTarget({ tagName: "INPUT" })) &&
+    isTextEntryTarget(fakeTarget({ tagName: "TEXTAREA" })) &&
+    isTextEntryTarget(fakeTarget({ tagName: "DIV", isContentEditable: true })) &&
+    !isTextEntryTarget(fakeTarget({ tagName: "DIV" })) &&
+    !isTextEntryTarget(null)
+)
+
+// Настройка зацикливания живёт в сторе и переживает экспорт/импорт выпуска.
+store().resetEpisode()
+const videoScene = store().addBackground("Завязка", {
+  title: "Живой фон",
+  src: "/assets/videos/bg-harbor-intro.mp4",
+  activate: false,
+})
+check(
+  "видео-сцена зацикливается по умолчанию",
+  isLoopEnabled(
+    store().backgrounds.find((item) => item.id === videoScene) ?? {
+      isLoop: true,
+    }
+  )
+)
+store().setBackgroundLoop(videoScene, false)
+check(
+  "setBackgroundLoop выключает повтор у нужной сцены",
+  store().backgrounds.find((item) => item.id === videoScene)?.isLoop === false
+)
+const exportedVideoScene = parseEpisodeFile(
+  JSON.stringify(buildEpisodeFile())
+).backgrounds.find((item) => item.id === videoScene)
+check(
+  "выключенный повтор уезжает в файл выпуска и возвращается",
+  exportedVideoScene?.isLoop === false &&
+    exportedVideoScene?.src === "/assets/videos/bg-harbor-intro.mp4",
+  String(exportedVideoScene?.src)
+)
+
+// Пауза, повтор и перемотка — живые команды: их применяют оба окна, а не только
+// плеер Мастера (на /screen они приезжают снапшотом).
+store().resetEpisode()
+check(
+  "видео стартует играющим, зацикленным и с начала",
+  store().videoPlayback.isPlaying === true &&
+    store().videoPlayback.isLoop === true &&
+    store().videoPlayback.seekTime === 0 &&
+    store().videoPlayback.seekId > 0
+)
+store().toggleVideoPlaying()
+check(
+  "toggleVideoPlaying ставит видео на паузу",
+  store().videoPlayback.isPlaying === false
+)
+store().setVideoPlaying(true)
+check("setVideoPlaying возобновляет видео", store().videoPlayback.isPlaying === true)
+
+const seekIdBefore = store().videoPlayback.seekId
+store().seekVideo(42)
+check(
+  "seekVideo меняет время и выдаёт новую метку события",
+  store().videoPlayback.seekTime === 42 &&
+    store().videoPlayback.seekId !== seekIdBefore,
+  `${seekIdBefore} → ${store().videoPlayback.seekId}`
+)
+
+// Повтор: живое состояние (его видит /screen) и настройка самой сцены (её
+// экспортирует файл выпуска).
+const liveSceneId = store().activeBackgroundId
+store().setVideoLoop(false)
+check(
+  "setVideoLoop выключает повтор и в плеере, и в настройках сцены",
+  store().videoPlayback.isLoop === false &&
+    store().backgrounds.find((item) => item.id === liveSceneId)?.isLoop === false
+)
+
+// Смена сцены: новое видео стартует с 00:00 и играет — синхронно в обоих окнах.
+store().setVideoPlaying(false)
+store().seekVideo(30)
+const otherScene = store().backgrounds.find((item) => item.id !== liveSceneId)
+if (otherScene) {
+  store().setBackgroundLoop(otherScene.id, false)
+  store().setActiveBackground(otherScene.id)
+  check(
+    "смена сцены сбрасывает видео на 00:00 и Play",
+    store().videoPlayback.isPlaying === true &&
+      store().videoPlayback.seekTime === 0 &&
+      store().activeBackgroundId === otherScene.id,
+    `пауза → ${store().videoPlayback.isPlaying}, время → ${store().videoPlayback.seekTime}`
+  )
+  check(
+    "повтор новой сцены берётся из её настроек",
+    store().videoPlayback.isLoop === false
+  )
+}
+
+// Пачечное удаление: персонажи уходят с карты и со сцены.
+store().resetEpisode()
+const doomedCharacters = store()
+  .characters.slice(0, 2)
+  .map((item) => item.id)
+const survivorToken = store().addToken(
+  store().characters[2].id,
+  1,
+  1,
+  store().activeMapId ?? undefined
+)
+store().toggleCharacterOnStage(doomedCharacters[0])
+const charactersBefore = store().characters.length
+const tokensBefore = store().mapTokens.length
+const doomedTokens = store().mapTokens.filter((token) =>
+  doomedCharacters.includes(token.characterId)
+).length
+store().deleteBatchCharacters(doomedCharacters)
+check(
+  "deleteBatchCharacters: персонажи, токены и сцена очищены",
+  doomedTokens > 0 &&
+    store().characters.length === charactersBefore - 2 &&
+    !store().characters.some((item) => doomedCharacters.includes(item.id)) &&
+    !store().mapTokens.some((token) =>
+      doomedCharacters.includes(token.characterId)
+    ) &&
+    store().mapTokens.some((token) => token.id === survivorToken) &&
+    store().mapTokens.length === tokensBefore - doomedTokens &&
+    store().activeCharacterId === null,
+  `токенов: ${store().mapTokens.length}, удалено: ${doomedTokens}`
+)
+
+// Пачечное удаление сцен: эфир переезжает на соседнюю, заметки уходят.
+store().resetEpisode()
+const doomedScenes = store()
+  .backgrounds.slice(0, 3)
+  .map((item) => item.id)
+const liveSceneBefore = store().activeBackgroundId
+check(
+  "заметка удаляемой сцены была на месте",
+  Boolean(store().sceneNotes[doomedScenes[1]])
+)
+store().deleteBatchBackgrounds(doomedScenes)
+check(
+  "deleteBatchBackgrounds: сцены, заметки и эфир согласованы",
+  !store().backgrounds.some((item) => doomedScenes.includes(item.id)) &&
+    !doomedScenes.some((id) => id in store().sceneNotes) &&
+    !doomedScenes.includes(store().activeBackgroundId) &&
+    store().backgrounds.length > 0,
+  store().activeBackgroundId === liveSceneBefore
+    ? "эфир не трогали"
+    : `эфир переехал: ${store().activeBackgroundId}`
+)
+
+// Последнюю сцену выпуска пачка не удаляет: на проекторе должно быть что показывать.
+store().resetEpisode()
+store().deleteBatchBackgrounds(store().backgrounds.map((item) => item.id))
+check(
+  "пачка не оставляет выпуск без сцен",
+  store().backgrounds.length === 1
+)
+
+// Треки и саундпад удаляются пачкой целиком.
+store().resetEpisode()
+const doomedTracks = store().tracks.slice(0, 2).map((item) => item.id)
+store().deleteBatchTracks(doomedTracks)
+check(
+  "deleteBatchTracks убирает выбранные треки",
+  store().tracks.length === seedTracks - 2 &&
+    !store().tracks.some((track) => doomedTracks.includes(track.id))
+)
+const doomedSfx = [
+  store().addSoundpadSlot({ title: "Один", icon: "Bomb", src: "/a.mp3" }),
+  store().addSoundpadSlot({ title: "Два", icon: "Zap", src: "/b.mp3" }),
+  store().addSoundpadSlot({ title: "Три", icon: "Flame", src: "/c.mp3" }),
+]
+store().deleteBatchSoundpadSlots([doomedSfx[0], doomedSfx[2]])
+check(
+  "deleteBatchSoundpadSlots убирает только выбранные слоты",
+  store().soundpad.length === 1 && store().soundpad[0].id === doomedSfx[1]
+)
+
+check(
+  "расширения видео поддержаны при выгрузке ассетов",
+  extensionFromDataUrl("data:video/mp4;base64,AA") === "mp4" &&
+    extensionFromDataUrl("data:video/webm;base64,AA") === "webm"
+)
+check(
+  "видео едет в файл выпуска ссылкой, а не Base64",
+  !JSON.stringify(buildEpisodeFile()).includes("data:video")
+)
 
 if (failures.length > 0) {
   throw new Error(

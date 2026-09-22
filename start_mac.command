@@ -15,8 +15,10 @@ echo "  Мастер-панель : http://localhost:5173/master"
 echo "  Экран для OBS : http://localhost:5173/screen"
 echo "  Связь окон    : ws://localhost:5174 (sync-сервер)"
 echo ""
+echo "  Загрузка картинок, музыки и видео в assets/ работает из коробки."
 echo "  Остановить сервер — Ctrl+C."
 echo ""
 
-# dev:all поднимает Vite и sync-сервер вместе — OBS-источник работает и без BroadcastChannel.
-npm run dev:all
+# npm run dev поднимает Vite и sync-сервер вместе: OBS-источник работает,
+# а middleware выгрузки файлов живёт внутри плагина Vite.
+npm run dev

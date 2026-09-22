@@ -3,18 +3,13 @@ import type { DragEvent } from "react"
 import { Grid3x3, Trash2, Users } from "lucide-react"
 import { BattleMapGrid } from "@/components/master-panel/BattleMapGrid"
 import { TokenPanel } from "@/components/master-panel/TokenPanel"
-import { tokenStyles } from "@/components/master-panel/tokenAppearance"
+import {
+  tokenCategoryAtPoint,
+  tokenStyles,
+} from "@/components/master-panel/tokenAppearance"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
 import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area"
-import { Separator } from "@/components/ui/separator"
 import { gridGeometry, mapGrid } from "@/data/content"
 import { backgroundIcons } from "@/data/seed"
 import {
@@ -35,6 +30,9 @@ export function BattleMapTab() {
   const setTokenPosition = useEpisodeStore((state) => state.setTokenPosition)
   const removeToken = useEpisodeStore((state) => state.removeToken)
   const setActiveMap = useEpisodeStore((state) => state.setActiveMap)
+  const setCharacterCategory = useEpisodeStore(
+    (state) => state.setCharacterCategory
+  )
   const toggleBattlemapMode = useEpisodeStore(
     (state) => state.toggleBattlemapMode
   )
@@ -86,15 +84,31 @@ export function BattleMapTab() {
     [activeMap, addToken, mapTokens, setTokenPosition]
   )
 
+  /**
+   * Один жест — два результата: отпустили над сеткой — ставим токен на клетку,
+   * отпустили над колонкой категорий — переносим персонажа в другую категорию.
+   * Отдельные ручки перетаскивания внутри токенов для этого не нужны.
+   */
   const handleGridDrop = useCallback(
-    (payload: DragPayload, cell: { cellX: number; cellY: number } | null) => {
+    (
+      payload: DragPayload,
+      cell: { cellX: number; cellY: number } | null,
+      point: { clientX: number; clientY: number }
+    ) => {
       const character = characters.find(
         (item) => item.id === payload.characterId
       )
       if (!character) return
-      placeCharacter(character, cell)
+      if (cell) {
+        placeCharacter(character, cell)
+        return
+      }
+      const category = tokenCategoryAtPoint(point.clientX, point.clientY)
+      if (category && category !== character.category) {
+        setCharacterCategory(character.id, category)
+      }
     },
-    [characters, placeCharacter]
+    [characters, placeCharacter, setCharacterCategory]
   )
 
   const { gridRef, drag, startDrag } = useGridDrop({
@@ -243,72 +257,61 @@ export function BattleMapTab() {
               }}
             />
 
-            <div className="pointer-events-none absolute inset-x-0 top-0 flex items-center justify-between gap-2 p-2">
+            <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-2 p-2">
               <Badge variant="secondary" className="gap-1">
                 <Grid3x3 className="size-3" />
                 {activeMap.title}
               </Badge>
-              <Badge
-                variant="outline"
-                className="gap-1 bg-background/80 backdrop-blur-sm"
-              >
-                <Users className="size-3" />
-                {mapTokens.length} на поле
-              </Badge>
-            </div>
-          </div>
-
-          <Card size="sm" className="shrink-0 gap-3">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Users className="size-4 text-muted-foreground" />
-                Токены и категории
-              </CardTitle>
-              <CardDescription>
-                Аватар — на поле, ручка справа — между колонками (смена
-                категории). ПКМ по токену на карте — убрать.
-              </CardDescription>
-            </CardHeader>
-
-            <CardContent className="space-y-3">
-              <TokenPanel
-                mapId={activeMap.id}
-                selectedCharacterId={activeTokenCharacterId}
-                // Анимация выхода на сцену — только из левой панели: здесь
-                // клик по карточке просто выбирает токен персонажа на карте.
-                onCardClick={(characterId) => {
-                  const token = mapTokens.find(
-                    (item) => item.characterId === characterId
-                  )
-                  if (token) setActiveTokenId(token.id)
-                }}
-                onDragToField={(payload, event) => {
-                  if (payload.tokenId) setActiveTokenId(payload.tokenId)
-                  startDrag(payload, event)
-                }}
-              />
-
-              <Separator />
-
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="text-xs text-muted-foreground">
-                  Токенов на поле: {mapTokens.length}
-                </span>
+              {/* Счётчик и уборка поля — поверх карты: отдельная строка снизу
+                  съедала место, которое нужно панели токенов. */}
+              <div className="pointer-events-auto flex items-center gap-1.5">
+                <Badge
+                  variant="outline"
+                  className="gap-1 bg-background/80 backdrop-blur-sm"
+                >
+                  <Users className="size-3" />
+                  {mapTokens.length} на поле
+                </Badge>
                 <Button
                   size="sm"
-                  variant="ghost"
+                  variant="secondary"
                   disabled={mapTokens.length === 0}
+                  title="Убрать с карты все токены"
                   onClick={() => {
                     mapTokens.forEach((token) => removeToken(token.id))
                     setActiveTokenId(null)
                   }}
+                  className="bg-background/80 backdrop-blur-sm"
                 >
                   <Trash2 />
-                  Убрать все токены
+                  Убрать все
                 </Button>
               </div>
-            </CardContent>
-          </Card>
+            </div>
+          </div>
+
+          {/*
+            Панель токенов: четыре колонки в ряд с тонкими вертикальными
+            дивайдерами, внутри — компактные круглые аватары без имён и ручек.
+            Рамки/подложки убраны: место нужно самой карте.
+          */}
+          <TokenPanel
+            variant="compact"
+            mapId={activeMap.id}
+            selectedCharacterId={activeTokenCharacterId}
+            // Анимация выхода на сцену — только из левой панели: здесь клик по
+            // токену просто выбирает персонажа на карте.
+            onCardClick={(characterId) => {
+              const token = mapTokens.find(
+                (item) => item.characterId === characterId
+              )
+              if (token) setActiveTokenId(token.id)
+            }}
+            onDragToField={(payload, event) => {
+              if (payload.tokenId) setActiveTokenId(payload.tokenId)
+              startDrag(payload, event)
+            }}
+          />
         </>
       ) : (
         <div className="rounded-lg border border-dashed border-border bg-muted/20 p-6 text-center text-xs text-muted-foreground">

@@ -5,13 +5,16 @@ import {
   Grid3x3,
   GripVertical,
   ImagePlus,
+  ListChecks,
   Pencil,
   Plus,
   ScrollText,
   Trash2,
 } from "lucide-react"
+import { BatchSelectionBar } from "@/components/master-panel/BatchSelectionBar"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Checkbox } from "@/components/ui/checkbox"
 import {
   Dialog,
   DialogContent,
@@ -32,12 +35,18 @@ import {
 } from "@/components/ui/context-menu"
 import { Separator } from "@/components/ui/separator"
 import { backgroundIcons } from "@/data/seed"
+import { useBatchSelection } from "@/hooks/useBatchSelection"
 import { prepareImageFile } from "@/lib/image-file"
+import { isVideoFile, isVideoSrc } from "@/lib/media"
+import { prepareVideoFile } from "@/lib/video-file"
 import { useEpisodeStore } from "@/store/useEpisodeStore"
 import { cn, fileNameWithoutExtension } from "@/lib/utils"
 
 /** MIME перетаскиваемого разделителя: сцены едут обычным text/plain. */
 const SCENE_GROUP_MIME = "application/x-pedinburg-scene-group"
+
+/** Что принимает проводник для сцены: картинка или видео-фон. */
+const SCENE_FILE_ACCEPT = "image/*,video/mp4,video/webm"
 
 export function BackgroundLibrary() {
   const backgrounds = useEpisodeStore((state) => state.backgrounds)
@@ -65,6 +74,12 @@ export function BackgroundLibrary() {
   const renameSceneGroup = useEpisodeStore((state) => state.renameSceneGroup)
   const removeSceneGroup = useEpisodeStore((state) => state.removeSceneGroup)
   const moveSceneGroup = useEpisodeStore((state) => state.moveSceneGroup)
+  const deleteBatchBackgrounds = useEpisodeStore(
+    (state) => state.deleteBatchBackgrounds
+  )
+
+  // Выделение сцен живёт в компоненте: в стор уезжает только само удаление.
+  const batch = useBatchSelection(deleteBatchBackgrounds)
 
   const [dragId, setDragId] = useState<string | null>(null)
   const [overId, setOverId] = useState<string | null>(null)
@@ -91,6 +106,25 @@ export function BackgroundLibrary() {
     fileInputRef.current?.click()
   }
 
+  /**
+   * Готовит выбранный файл к хранению в сторе. Картинка сжимается в data-URL (как
+   * и раньше), а видео сразу ложится файлом в `assets/videos`: data-URL видео в
+   * снапшот для /screen не влезет, а сервер отдаёт его с Range-запросами, то есть
+   * плеер умеет перематывать.
+   */
+  async function prepareSceneMedia(
+    file: File,
+    options: { id: string; label: string }
+  ) {
+    if (isVideoFile(file)) {
+      const prepared = await prepareVideoFile(file, options)
+      return { src: prepared.src, warning: prepared.warning }
+    }
+    // Сцена уезжает на проектор 1920×880 — режем до 1920 px, а не до 1024.
+    const prepared = await prepareImageFile(file, { maxSide: 1920 })
+    return { src: prepared.dataUrl, warning: prepared.warning }
+  }
+
   async function handleSceneImagePicked(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0]
     event.target.value = ""
@@ -98,9 +132,12 @@ export function BackgroundLibrary() {
     setImageTargetId(null)
     if (!file || !backgroundId) return
     try {
-      // Сцена уезжает на проектор 1920×880 — режем до 1920 px, а не до 1024.
-      const prepared = await prepareImageFile(file, { maxSide: 1920 })
-      updateBackgroundImage(backgroundId, prepared.dataUrl)
+      const prepared = await prepareSceneMedia(file, {
+        id: backgroundId,
+        label: fileNameWithoutExtension(file.name),
+      })
+      updateBackgroundImage(backgroundId, prepared.src)
+      if (prepared.warning) setSceneNotice(prepared.warning)
     } catch (thrown) {
       setImageError(
         thrown instanceof Error ? thrown.message : "Не удалось обработать файл"
@@ -140,16 +177,21 @@ export function BackgroundLibrary() {
         `Импорт сцен: ${index + 1} из ${files.length} — ${file.name}`
       )
       try {
-        const prepared = await prepareImageFile(file, { maxSide: 1920 })
+        const prepared = await prepareSceneMedia(file, {
+          // Имя файла ассета: у первой сцены — её id (файл перезаписывается при
+          // повторной замене), у остальных — собственное имя файла.
+          id: index === 0 ? pending.id : "scene",
+          label: fileNameWithoutExtension(file.name),
+        })
         const title = fileNameWithoutExtension(file.name)
         if (index === 0) {
           // Первый файл занимает сцену кнопки «+» — она уже стоит в эфире.
-          updateBackgroundImage(pending.id, prepared.dataUrl)
+          updateBackgroundImage(pending.id, prepared.src)
           renameBackground(pending.id, title)
         } else {
           addBackground(pending.group, {
             title,
-            src: prepared.dataUrl,
+            src: prepared.src,
             activate: false,
           })
         }
@@ -234,6 +276,15 @@ export function BackgroundLibrary() {
     <div className="flex shrink-0 flex-col gap-4">
         {sceneNotice ? (
           <p className="text-xs text-muted-foreground">{sceneNotice}</p>
+        ) : null}
+
+        {batch.isSelecting ? (
+          <BatchSelectionBar
+            count={batch.count}
+            itemsLabel="Сцены"
+            onDelete={batch.deleteSelected}
+            onCancel={batch.cancel}
+          />
         ) : null}
 
         {groups.map((group) => {
@@ -338,17 +389,32 @@ export function BackgroundLibrary() {
                 const hasNote = Boolean(sceneNotes[background.id]?.trim())
                 const isDragging = background.id === dragId
                 const isOver = background.id === overId
+                const isSelected = batch.isSelected(background.id)
 
                 return (
                   <ContextMenu key={background.id}>
                     <ContextMenuTrigger asChild>
+                      <div className="relative">
                       <button
                         type="button"
-                        draggable
-                        onClick={() => setActiveBackground(background.id)}
-                        onDoubleClick={() => pickSceneImage(background.id)}
-                        title="Двойной клик — добавить или заменить картинку сцены"
+                        // В режиме выделения сцены не таскаем: клик только отмечает.
+                        draggable={!batch.isSelecting}
+                        onClick={() =>
+                          batch.isSelecting
+                            ? batch.toggle(background.id)
+                            : setActiveBackground(background.id)
+                        }
+                        onDoubleClick={() => {
+                          if (batch.isSelecting) return
+                          pickSceneImage(background.id)
+                        }}
+                        title={
+                          batch.isSelecting
+                            ? `${background.title} — клик отмечает сцену`
+                            : "Двойной клик — добавить картинку или видео сцены"
+                        }
                         onDragStart={(event) => {
+                          if (batch.isSelecting) return
                           setDragId(background.id)
                           event.dataTransfer.effectAllowed = "move"
                           event.dataTransfer.setData(
@@ -379,16 +445,29 @@ export function BackgroundLibrary() {
                             ? "border-ring ring-2 ring-ring/40"
                             : "border-border",
                           isDragging && "opacity-60",
-                          isOver && !dragGroup && "ring-2 ring-ring"
+                          isOver && !dragGroup && "ring-2 ring-ring",
+                          isSelected &&
+                            "ring-2 ring-ring ring-offset-2 ring-offset-background"
                         )}
                       >
                         {background.src ? (
-                          <img
-                            src={background.src}
-                            alt={background.title}
-                            draggable={false}
-                            className="absolute inset-0 size-full object-cover"
-                          />
+                          isVideoSrc(background.src) ? (
+                            // Кадр видео-сцены: без звука и без автоплея — только превью.
+                            <video
+                              src={background.src}
+                              muted
+                              playsInline
+                              preload="metadata"
+                              className="absolute inset-0 size-full object-cover"
+                            />
+                          ) : (
+                            <img
+                              src={background.src}
+                              alt={background.title}
+                              draggable={false}
+                              className="absolute inset-0 size-full object-cover"
+                            />
+                          )
                         ) : Icon ? (
                           <Icon className="size-6 text-muted-foreground transition-colors group-hover:text-foreground" />
                         ) : (
@@ -399,10 +478,13 @@ export function BackgroundLibrary() {
                           <span className="min-w-0 flex-1 truncate text-left text-[11px]">
                             {background.title}
                           </span>
-                          <GripVertical className="size-3.5 shrink-0 cursor-grab text-muted-foreground" />
+                          {batch.isSelecting ? null : (
+                            <GripVertical className="size-3.5 shrink-0 cursor-grab text-muted-foreground" />
+                          )}
                         </span>
 
-                        {background.isBattlemap ? (
+                        {/* Место в углу занято чекбоксом режима выделения. */}
+                        {background.isBattlemap && !batch.isSelecting ? (
                           <Badge
                             variant="secondary"
                             className="absolute top-1 left-1 gap-1"
@@ -421,10 +503,34 @@ export function BackgroundLibrary() {
                           </Badge>
                         ) : null}
                       </button>
+
+                      {/* Чекбокс вне кнопки: внутри неё он был бы невалидной вёрсткой. */}
+                      {batch.isSelecting ? (
+                        <Checkbox
+                          checked={isSelected}
+                          aria-label={`Отметить сцену «${background.title}»`}
+                          className="pointer-events-none absolute top-1 left-1 z-10 bg-background/90"
+                        />
+                      ) : null}
+                      </div>
                     </ContextMenuTrigger>
 
                     <ContextMenuContent className="w-64">
                       <ContextMenuLabel>{background.title}</ContextMenuLabel>
+                      <ContextMenuSeparator />
+                      <ContextMenuItem onSelect={() => batch.start(background.id)}>
+                        <ListChecks />
+                        Выделить несколько
+                      </ContextMenuItem>
+                      {batch.isSelecting && isSelected ? (
+                        <ContextMenuItem
+                          variant="destructive"
+                          onSelect={batch.deleteSelected}
+                        >
+                          <Trash2 />
+                          Удалить выбранные ({batch.count})
+                        </ContextMenuItem>
+                      ) : null}
                       <ContextMenuSeparator />
                       <ContextMenuItem
                         onSelect={() => pickSceneImage(background.id)}
@@ -506,16 +612,16 @@ export function BackgroundLibrary() {
         <input
           ref={fileInputRef}
           type="file"
-          accept="image/*"
+          accept={SCENE_FILE_ACCEPT}
           className="hidden"
           onChange={handleSceneImagePicked}
         />
 
-        {/* Пакетный импорт сцен: несколько картинок сразу в один разделитель. */}
+        {/* Пакетный импорт сцен: несколько картинок или видео сразу в один разделитель. */}
         <input
           ref={groupImagesInputRef}
           type="file"
-          accept="image/*"
+          accept={SCENE_FILE_ACCEPT}
           multiple
           className="hidden"
           onChange={handleGroupImagesPicked}

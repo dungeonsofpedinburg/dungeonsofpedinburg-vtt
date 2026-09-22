@@ -1,7 +1,8 @@
-import { useRef, useState } from "react"
+import { useCallback, useRef, useState } from "react"
 import type { ChangeEvent, DragEvent } from "react"
 import {
   GripVertical,
+  ListChecks,
   Music,
   Pause,
   Pencil,
@@ -15,10 +16,13 @@ import {
   Volume2,
   VolumeX,
 } from "lucide-react"
+import { BatchSelectionBar } from "@/components/master-panel/BatchSelectionBar"
 import { TrackDialog } from "@/components/master-panel/TrackDialog"
+import { SoundpadPanel } from "@/components/master-panel/SoundpadPanel"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardFooter } from "@/components/ui/card"
+import { Checkbox } from "@/components/ui/checkbox"
 import {
   ContextMenu,
   ContextMenuContent,
@@ -28,10 +32,12 @@ import {
   ContextMenuTrigger,
 } from "@/components/ui/context-menu"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { Separator } from "@/components/ui/separator"
 import { Slider } from "@/components/ui/slider"
 import { useSoundtrack } from "@/hooks/useSoundtrack"
 import { formatDuration, prepareAudioFile } from "@/lib/audio-file"
 import { trackToInput } from "@/lib/track"
+import { useBatchSelection } from "@/hooks/useBatchSelection"
 import { useEpisodeStore } from "@/store/useEpisodeStore"
 import { cn } from "@/lib/utils"
 
@@ -41,6 +47,7 @@ export function SoundtrackTab() {
   const addTrack = useEpisodeStore((state) => state.addTrack)
   const updateTrack = useEpisodeStore((state) => state.updateTrack)
   const removeTrack = useEpisodeStore((state) => state.removeTrack)
+  const deleteBatchTracks = useEpisodeStore((state) => state.deleteBatchTracks)
 
   const mp3InputRef = useRef<HTMLInputElement>(null)
   const [dragId, setDragId] = useState<string | null>(null)
@@ -52,6 +59,22 @@ export function SoundtrackTab() {
   // Плеер живёт в SoundtrackProvider над вкладками — музыка не глохнет при
   // переключении вкладок. Здесь только UI поверх него.
   const player = useSoundtrack()
+
+  /**
+   * Пачечное удаление треков: стор убирает строки, а плеер нужно перевести на
+   * первый оставшийся трек, если удалили играющий.
+   */
+  const deleteTracksBatch = useCallback(
+    (ids: string[]) => {
+      if (ids.includes(player.currentId)) {
+        const remaining = tracks.filter((track) => !ids.includes(track.id))
+        player.select(remaining[0]?.id ?? "")
+      }
+      deleteBatchTracks(ids)
+    },
+    [deleteBatchTracks, player, tracks]
+  )
+  const batch = useBatchSelection(deleteTracksBatch)
   const current = player.current
   const editTarget = tracks.find((track) => track.id === editTargetId) ?? null
   const progress = player.duration
@@ -128,6 +151,23 @@ export function SoundtrackTab() {
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-3">
+      {/*
+        Саундпад — над плейлистом и без серой подложки. Звуки играет модуль
+        `@/lib/sfx-player`, поэтому переход на «Карты» или «Кубики» их не
+        обрывает, а музыка при запуске эффекта не глохнет.
+      */}
+      <SoundpadPanel />
+      <Separator />
+
+      {batch.isSelecting ? (
+        <BatchSelectionBar
+          count={batch.count}
+          itemsLabel="Треки"
+          onDelete={batch.deleteSelected}
+          onCancel={batch.cancel}
+        />
+      ) : null}
+
       <div className="flex shrink-0 items-center justify-between gap-2">
         <span className="text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
           Плейлист · {tracks.length}
@@ -162,13 +202,20 @@ export function SoundtrackTab() {
             const isCurrent = track.id === player.currentId
             const isDragging = track.id === dragId
             const isOver = track.id === overId
+            const isSelected = batch.isSelected(track.id)
 
             return (
               <ContextMenu key={track.id}>
                 <ContextMenuTrigger asChild>
                   <div
-                    draggable
+                    draggable={!batch.isSelecting}
+                    onClick={() => {
+                      // В режиме выделения клик по строке отмечает трек, а не
+                      // запускает воспроизведение.
+                      if (batch.isSelecting) batch.toggle(track.id)
+                    }}
                     onDragStart={(event) => {
+                      if (batch.isSelecting) return
                       setDragId(track.id)
                       event.dataTransfer.effectAllowed = "move"
                       event.dataTransfer.setData("text/plain", track.id)
@@ -189,11 +236,37 @@ export function SoundtrackTab() {
                       "flex items-center gap-3 border-b border-border/60 px-2 py-2 text-left transition-colors last:border-b-0 hover:bg-muted/60",
                       isCurrent && "bg-muted",
                       isDragging && "opacity-60",
-                      isOver && "ring-2 ring-ring"
+                      isOver && "ring-2 ring-ring",
+                      batch.isSelecting && "cursor-pointer",
+                      isSelected && "bg-accent/40"
                     )}
                   >
-                    <GripVertical className="size-4 shrink-0 cursor-grab text-muted-foreground" />
-                    {/* Обложка из метаданных MP3: запуск трека — только по ней */}
+                    {batch.isSelecting ? (
+                      <Checkbox
+                        checked={isSelected}
+                        aria-label={`Отметить трек «${track.title}»`}
+                        className="pointer-events-none shrink-0"
+                      />
+                    ) : (
+                      <GripVertical className="size-4 shrink-0 cursor-grab text-muted-foreground" />
+                    )}
+                    {/* Обложка из метаданных MP3: запуск трека — только по ней.
+                        В режиме выделения это просто картинка: клик должен
+                        доходить до строки и отмечать трек. */}
+                    {batch.isSelecting ? (
+                      <span className="flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-md border border-border bg-muted text-muted-foreground">
+                        {track.coverSrc ? (
+                          <img
+                            src={track.coverSrc}
+                            alt=""
+                            draggable={false}
+                            className="size-full object-cover"
+                          />
+                        ) : (
+                          <Music className="size-4" />
+                        )}
+                      </span>
+                    ) : (
                     <button
                       type="button"
                       disabled={!track.audioSrc}
@@ -230,6 +303,7 @@ export function SoundtrackTab() {
                         )}
                       </span>
                     </button>
+                    )}
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-sm font-medium">
                         {track.title}
@@ -254,6 +328,20 @@ export function SoundtrackTab() {
 
                 <ContextMenuContent className="w-52">
                   <ContextMenuLabel>{track.title}</ContextMenuLabel>
+                  <ContextMenuSeparator />
+                  <ContextMenuItem onSelect={() => batch.start(track.id)}>
+                    <ListChecks />
+                    Выделить несколько
+                  </ContextMenuItem>
+                  {batch.isSelecting && isSelected ? (
+                    <ContextMenuItem
+                      variant="destructive"
+                      onSelect={batch.deleteSelected}
+                    >
+                      <Trash2 />
+                      Удалить выбранные ({batch.count})
+                    </ContextMenuItem>
+                  ) : null}
                   <ContextMenuSeparator />
                   <ContextMenuItem onSelect={() => setEditTargetId(track.id)}>
                     <Pencil />

@@ -19,10 +19,15 @@ export type DragState = DragPayload & {
 type UseGridDropOptions = {
   /** Геометрия сетки: ровные клетки + «сдача» по краям поля */
   geometry: GridGeometry
-  /** cell = null, если отпустили вне поля или в неровной краевой полосе */
+  /**
+   * `cell = null`, если отпустили вне поля или в неровной краевой полосе.
+   * Точка отпускания нужна вызывающему: по ней он различает дроп на поле и
+   * дроп в колонку категорий панели токенов.
+   */
   onDrop: (
     payload: DragPayload,
-    cell: { cellX: number; cellY: number } | null
+    cell: { cellX: number; cellY: number } | null,
+    point: { clientX: number; clientY: number }
   ) => void
 }
 
@@ -143,7 +148,8 @@ export function useGridDrop({ geometry, onDrop }: UseGridDropOptions) {
         payload,
         resolved && resolved.inside
           ? { cellX: resolved.cellX, cellY: resolved.cellY }
-          : null
+          : null,
+        { clientX: event.clientX, clientY: event.clientY }
       )
     }
 

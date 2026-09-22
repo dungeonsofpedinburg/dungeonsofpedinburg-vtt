@@ -1,5 +1,11 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { createReadStream, existsSync, statSync } from 'node:fs'
+import {
+  createReadStream,
+  existsSync,
+  mkdirSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import path from 'path'
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
@@ -10,6 +16,45 @@ import { defineConfig, type Plugin } from 'vite'
  * выпуска (`/assets/scenes/harbor.png`), поэтому он одинаков на Windows и macOS.
  */
 const ASSETS_URL_PREFIX = '/assets/'
+
+/**
+ * Эндпоинт выгрузки ассетов выпуска: Мастер выбирает картинки и музыку в
+ * браузере, а файлы ложатся в корневую папку ./assets — из JSON на них едет
+ * только относительный путь. Без этого шага файл выпуска раздувался бы Base64.
+ */
+const ASSET_UPLOAD_ENDPOINT = '/__pedinburg/assets'
+
+/**
+ * Предел размера тела запроса на выгрузку ассета — 1 ГБ.
+ *
+ * Тело — это JSON с data-URL, а Base64 добавляет к файлу ещё ~33 %, поэтому
+ * запас взят с расчётом на тяжёлые видео-фоны (70 МБ и заметно больше): сервер
+ * обязан принимать их без «файл слишком большой». Что не влезло — отсекаем
+ * ответом 413, не читая поток целиком.
+ */
+const MAX_ASSET_UPLOAD_BYTES = 1024 * 1024 * 1024
+
+/** Размер для сообщений об ошибке: 1.0 ГБ, 64 МБ. */
+function formatBytes(bytes: number) {
+  const megabytes = bytes / 1024 / 1024
+  return megabytes >= 1024
+    ? `${(megabytes / 1024).toFixed(1)} ГБ`
+    : `${Math.round(megabytes)} МБ`
+}
+
+/** Символы, недопустимые в пути ассета: разделители Windows и прочие спецсимволы. */
+const UNSAFE_ASSET_PATH = /[\\:*?"<>|]/
+
+/** Есть ли в пути управляющие символы: их в именах файлов быть не должно. */
+function hasControlChars(value: string) {
+  for (const char of value) {
+    if ((char.codePointAt(0) ?? 0) < 0x20) return true
+  }
+  return false
+}
+
+/** data-URL с base64: `data:image/webp;base64,AAAA…` */
+const DATA_URL_PATTERN = /^data:[^;,]+;base64,([\s\S]+)$/
 
 /**
  * Папки dice-box (`ammo` — WASM-физика, `themes` — оформление кубиков) лежат в
@@ -72,13 +117,153 @@ function parseByteRange(header: string | undefined, size: number) {
   return { start, end: Math.min(end, size - 1) }
 }
 
+/** Ответ эндпоинта выгрузки: JSON, который клиент читает как отчёт о записи файла. */
+function sendJson(res: ServerResponse, status: number, body: unknown) {
+  res.statusCode = status
+  res.setHeader('Content-Type', 'application/json; charset=utf-8')
+  // Это отчёт о записи, а не файл: кэшировать его нельзя.
+  res.setHeader('Cache-Control', 'no-store')
+  res.end(JSON.stringify(body))
+}
+
+/** Тело запроса больше предела: клиенту отвечаем 413, а не общей 500. */
+class RequestTooLargeError extends Error {}
+
+/**
+ * Тело запроса целиком. Ассет едет в JSON как data-URL, поэтому тело бывает
+ * крупным (Base64 — это +33% к размеру файла): читаем поток с ограничением.
+ *
+ * Превышение предела не роняет соединение: отвечаем клиенту ошибкой, а остаток
+ * тела сливаем в никуда (`req.resume()`), иначе браузер увидел бы обрыв сети
+ * вместо понятного сообщения.
+ */
+function readRequestBody(req: IncomingMessage) {
+  return new Promise<string>((resolve, reject) => {
+    // Размер обычно известен заранее — на этом отсекаем сразу, без чтения.
+    const declared = Number(req.headers['content-length'] ?? 0)
+    if (Number.isFinite(declared) && declared > MAX_ASSET_UPLOAD_BYTES) {
+      req.resume()
+      reject(new RequestTooLargeError('тело запроса больше допустимого размера'))
+      return
+    }
+
+    const chunks: Buffer[] = []
+    let size = 0
+    let settled = false
+    req.on('data', (chunk: Buffer) => {
+      if (settled) return
+      size += chunk.length
+      if (size > MAX_ASSET_UPLOAD_BYTES) {
+        settled = true
+        chunks.length = 0
+        reject(new RequestTooLargeError('тело запроса больше допустимого размера'))
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => {
+      if (settled) return
+      settled = true
+      resolve(Buffer.concat(chunks).toString('utf8'))
+    })
+    req.on('error', (error) => {
+      if (settled) return
+      settled = true
+      reject(error)
+    })
+  })
+}
+
+/**
+ * Путь внутри корневой `assets/` для принимаемого файла или `null`, если путь
+ * небезопасен: выход за папку (`..`), буква диска, обратные слеши, имя без
+ * известного расширения. Расширения сверяем с таблицей MIME — так в папку
+ * ассетов не попадёт ничего исполняемого.
+ */
+function resolveAssetFilePath(assetsRoot: string, relativePath: string) {
+  if (!relativePath || UNSAFE_ASSET_PATH.test(relativePath)) return null
+  if (hasControlChars(relativePath)) return null
+  const segments = relativePath.split('/')
+  if (segments.some((part) => part === '' || part === '.' || part === '..')) return null
+  const extension = path.extname(relativePath).toLowerCase()
+  if (!(extension in ASSET_MIME_TYPES)) return null
+  const filePath = path.resolve(assetsRoot, relativePath)
+  // Второй барьер к `..`: итоговый путь обязан остаться внутри assets/.
+  if (!filePath.startsWith(assetsRoot + path.sep)) return null
+  return filePath
+}
+
+/**
+ * Приём ассета выпуска от Мастера: раскодирует data-URL из тела запроса и кладёт
+ * файл в корневую папку `assets/`, чтобы в JSON выпуска уехал относительный путь
+ * (`/assets/scenes/forest.jpg`), а не Base64 на сто мегабайт.
+ */
+async function handleAssetUpload(
+  req: IncomingMessage,
+  res: ServerResponse,
+  assetsRoot: string
+) {
+  try {
+    const body = JSON.parse(await readRequestBody(req)) as {
+      path?: unknown
+      dataUrl?: unknown
+    }
+    if (typeof body.path !== 'string' || typeof body.dataUrl !== 'string') {
+      sendJson(res, 400, { error: 'нужны поля path и dataUrl' })
+      return
+    }
+    const filePath = resolveAssetFilePath(assetsRoot, body.path)
+    if (!filePath) {
+      sendJson(res, 400, { error: 'недопустимый путь ассета' })
+      return
+    }
+    const match = DATA_URL_PATTERN.exec(body.dataUrl.trim())
+    if (!match) {
+      sendJson(res, 400, { error: 'ожидался data-URL с base64' })
+      return
+    }
+    const file = Buffer.from(match[1], 'base64')
+    if (file.length === 0) {
+      sendJson(res, 400, { error: 'пустой файл' })
+      return
+    }
+    mkdirSync(path.dirname(filePath), { recursive: true })
+    writeFileSync(filePath, file)
+    sendJson(res, 200, {
+      url: `${ASSETS_URL_PREFIX}${body.path}`,
+      bytes: file.length,
+    })
+  } catch (error) {
+    if (error instanceof RequestTooLargeError) {
+      // 413 — «файл слишком большой»: так браузер видит понятную причину,
+      // а не обрыв соединения посреди выгрузки.
+      sendJson(res, 413, {
+        error: `файл слишком большой: предел ${formatBytes(MAX_ASSET_UPLOAD_BYTES)} на тело запроса (в JSON ассет едет в base64, это ещё +33% к файлу)`,
+      })
+      return
+    }
+    sendJson(res, 500, {
+      error: error instanceof Error ? error.message : 'не удалось сохранить ассет',
+    })
+  }
+}
+
 /**
  * Отдаёт файлы из корневой папки `assets/` по URL `/assets/...` — и в dev, и в
  * preview. Без этого пути из JSON выпуска работали бы только в dev (Vite отдаёт
  * файлы корня проекта неявно) и падали с 404 в preview, где есть только dist.
+ * Тот же middleware принимает POST `/__pedinburg/assets` — запись ассетов выпуска.
  */
 function createEpisodeAssetsMiddleware(assetsRoot: string) {
   return (req: IncomingMessage, res: ServerResponse, next: () => void) => {
+    if (req.url?.startsWith(ASSET_UPLOAD_ENDPOINT)) {
+      if (req.method !== 'POST') {
+        sendJson(res, 405, { error: 'нужен метод POST' })
+        return
+      }
+      void handleAssetUpload(req, res, assetsRoot)
+      return
+    }
     if (req.method !== 'GET' && req.method !== 'HEAD') return next()
     const url = req.url ?? ''
     if (!url.startsWith(ASSETS_URL_PREFIX)) return next()

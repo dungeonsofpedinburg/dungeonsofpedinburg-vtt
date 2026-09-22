@@ -4,12 +4,12 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "node scripts/dev.mjs",
     "dev:all": "node scripts/dev.mjs",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "smoke": "node scripts/smoke.mjs",
-    "preview": "vite preview",
+    "preview": "node scripts/dev.mjs --preview",
     "preview:all": "node scripts/dev.mjs --preview",
     "sync": "node server/index.mjs"
   },

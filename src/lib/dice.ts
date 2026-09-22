@@ -23,6 +23,16 @@ export const ROLL_WAIT_MS = 5000
  */
 export const ROLL_WAIT_WITH_SCREEN_MS = 15000
 
+/**
+ * Сторожевой таймер физики на /screen: если `roll()` не отдал результат за
+ * 7 секунд, движок считаем зависшим. Сцену гасим, инстанс выбрасываем (следующий
+ * бросок поднимет новый), а Мастеру уходит локальная оценка со знаком «≈» —
+ * интерфейс не замирает в «Кубики летят…». В таймер входит только сам бросок:
+ * загрузка темы и ammo.wasm идёт отдельным шагом перед ним, а полёт кубиков
+ * занимает 2–4 с, поэтому 7 секунд — заведомо «зависший» результат.
+ */
+export const DICE_ROLL_WATCHDOG_MS = 7000
+
 /** Сколько ждать итог: экран на связи — ждём физику, иначе считаем локально. */
 export function rollWaitMsFor(screenCount: number) {
   return screenCount > 0 ? ROLL_WAIT_WITH_SCREEN_MS : ROLL_WAIT_MS
@@ -79,7 +89,24 @@ export function summarizeDiceResults(results: DiceBoxRollResult[]): {
       dice.push({ sides: normalizeSides(entry.sides, groupSides), value })
     })
   })
-  return { dice, sum: dice.reduce((total, die) => total + die.value, 0) }
+  return { dice, sum: diceSum(dice) }
+}
+
+/** Сумма значений кубиков — общая для физики и локальной оценки. */
+export function diceSum(dice: RollDie[]) {
+  return dice.reduce((total, die) => total + die.value, 0)
+}
+
+/**
+ * Локальная оценка броска: экран OBS не ответил (или физика зависла), посчитать
+ * значения негде — берём случайные в границах кубиков. Итог такого броска всегда
+ * помечается `estimated`, в плашке он идёт со знаком «≈».
+ */
+export function estimateDiceRoll(pool: DieSides[]): RollDie[] {
+  return pool.map((sides) => ({
+    sides,
+    value: Math.floor(Math.random() * sides) + 1,
+  }))
 }
 
 /**

@@ -4,6 +4,26 @@ import type { EpisodeFile } from "@/data/types"
 export const ASSETS_URL_PREFIX = "/assets/"
 
 /**
+ * Постоянное хранилище выпусков внутри корня assets/ (`/assets/episodes/...`):
+ * папку выпуска с `episode.json`, `scenes/`, `characters/` и `music/` кладут
+ * вручную — она переживает очистку кэша и её нельзя удалять.
+ */
+export const ASSETS_EPISODES_PREFIX = `${ASSETS_URL_PREFIX}episodes/`
+
+/**
+ * Временный кэш приложения (`/assets/cache/...`): сюда кладёт файлы эндпоинт
+ * выгрузки (`POST /__pedinburg/assets`, Base64, видео). Папку можно стереть
+ * целиком — приложение создаст её заново при следующей загрузке.
+ */
+export const ASSETS_CACHE_PREFIX = `${ASSETS_URL_PREFIX}cache/`
+
+/**
+ * Папка внутри корня assets/, записанная без самого слова `assets`:
+ * `episodes/ep-01/scenes/forest.jpg`. Так пишут пути вручную собранные выпуски.
+ */
+const ROOT_RELATIVE_FOLDERS = /^(?:episodes|cache)\//i
+
+/**
  * Значения, которые уже являются ссылкой, а не путём к файлу: data-URL картинок
  * из стора, blob:-превью, CDN и протокол-относительные ссылки — не переписываем.
  */
@@ -16,21 +36,44 @@ const KEEP_AS_IS = /^(?:data:|blob:|https?:|\/\/)/i
  *   "/Users/me/proj/assets/music/theme.mp3" → "/assets/music/theme.mp3"
  *   "file:///D:/proj/assets/x.png" → "/assets/x.png"
  *   "assets/scenes/forest.jpg" → "/assets/scenes/forest.jpg"
+ *   "episodes/ep-01/scenes/forest.jpg" → "/assets/episodes/ep-01/scenes/forest.jpg"
  *
  * Значения без папки assets (например `/placeholders/*.svg` или data-URL)
  * возвращаются как есть: подставить им префикс нельзя.
+ *
+ * Заодно имена приводятся к канонической форме NFC: macOS хранит кириллицу в NFD
+ * («й» = «и» + диакритика), а в JSON и URL должен лежать один и тот же вид пути —
+ * сервер найдёт файл на диске и по NFC, и по NFD (см. `vite.config.ts`).
  */
 export function toAssetUrl(value: string | null | undefined): string {
   const path = (value ?? "").trim()
   if (!path || KEEP_AS_IS.test(path)) return path
   // file:///D:/proj/assets/x.png → D:/proj/assets/x.png, затем слеши \\ → /.
-  const unified = path.replace(/^file:\/{2,}/i, "").replace(/\\/g, "/")
+  const unified = path
+    .replace(/^file:\/{2,}/i, "")
+    .replace(/\\/g, "/")
+    .replace(/^\.\//, "")
+    .normalize("NFC")
   if (unified.startsWith("assets/")) {
     return `${ASSETS_URL_PREFIX}${unified.slice("assets/".length)}`
+  }
+  // Путь от корня assets/ без самого слова `assets`: `episodes/ep-01/scene.png`,
+  // `cache/music/theme.mp3` — обе зоны валидны, префикс просто дописываем.
+  if (ROOT_RELATIVE_FOLDERS.test(unified)) {
+    return `${ASSETS_URL_PREFIX}${unified}`
   }
   // Жадный `.*` — берём последнее вхождение `/assets/`: путь с вложенной папкой
   // assets/assets/x.png тоже даёт корректный URL от корня.
   return unified.replace(/^.*\/assets\//i, ASSETS_URL_PREFIX)
+}
+
+/**
+ * Путь лежит внутри корня assets/ — в постоянных выпусках (`episodes/`) или в
+ * кэше (`cache/`), либо прямо в его подпапках. Значения вне корня (CDN,
+ * data-URL, чужой системный путь) возвращают `false`.
+ */
+export function isAssetLibraryPath(value: string | null | undefined) {
+  return (value ?? "").trim().startsWith(ASSETS_URL_PREFIX)
 }
 
 /**
@@ -127,13 +170,14 @@ export function assetFileName(
 
 /**
  * Копия файла выпуска, где все пути к ассетам приведены к виду `/assets/...`
- * с прямыми слешами (без букв диска и домашних папок). Стор не меняется —
- * маппинг возвращает новые массивы и объекты.
+ * с прямыми слешами (без букв диска и домашних папок) и к форме NFC. Стор не
+ * меняется — маппинг возвращает новые массивы и объекты.
  *
  * Картинка токена лежит в самом персонаже (avatarSrc/fullBodyPngSrc), поэтому
  * отдельные пути у mapTokens не нужны; sceneNotes — текст, его не трогаем.
  * Звуковой эффект саундпада (`soundpad[].src`) нормализуется как обычный ассет:
- * в файле выпуска он тоже лежит в папке `assets/`.
+ * в файле выпуска он тоже лежит в папке `assets/` (постоянно — в `episodes/`,
+ * из интерфейса — в `cache/`).
  */
 export function normalizeEpisodeAssets(file: EpisodeFile): EpisodeFile {
   const backgrounds = Array.isArray(file.backgrounds) ? file.backgrounds : []

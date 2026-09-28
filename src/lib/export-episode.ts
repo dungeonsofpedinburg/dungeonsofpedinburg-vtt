@@ -1,6 +1,7 @@
 import {
   assetFileName,
   extensionFromDataUrl,
+  isAssetLibraryPath,
   isInlineAsset,
   isSessionUrl,
   isSystemPath,
@@ -12,8 +13,10 @@ import type { EpisodeFile } from "@/data/types"
 /**
  * Экспорт выпуска: файл `episode.json` везёт ТОЛЬКО текстовые данные — разметку
  * заметок, координаты токенов и относительные пути к ассетам. Картинки и музыка
- * живут отдельными файлами в корневой папке `assets/`, поэтому JSON весит
- * сотню килобайт вместо ста мегабайт и одинаково читается на Windows и macOS.
+ * живут отдельными файлами в корне `assets/`: постоянные — в `assets/episodes/`
+ * (их кладут вручную вместе с JSON), загруженные из интерфейса — в
+ * `assets/cache/` (временный кэш, его можно стереть). Поэтому JSON весит сотню
+ * килобайт вместо ста мегабайт и одинаково читается на Windows и macOS.
  *
  * Здесь же лежит страховка: Base64 (`data:...`) и системные пути (`C:\...`,
  * `/Users/...`) в файл выпуска не попадают ни при каких условиях.
@@ -22,7 +25,12 @@ import type { EpisodeFile } from "@/data/types"
 /** Предел веса JSON: разметка выпуска — это килобайты, а не мегабайты. */
 export const EPISODE_JSON_LIMIT_BYTES = 500 * 1024
 
-/** Папки ассетов выпуска внутри корневой `assets/`: их и передают вместе с JSON. */
+/**
+ * Папки ассетов внутри корня `assets/`. Сюда экспорт кладёт выгруженные файлы —
+ * уже внутри временного кэша `assets/cache/` (постоянное хранилище `episodes/`
+ * наполняют вручную, приложение в него не пишет). В JSON уезжает полный путь
+ * `/assets/cache/scenes/forest.jpg`, поэтому код папок остаётся коротким.
+ */
 export const ASSET_FOLDERS = {
   scenes: "scenes",
   characters: "characters",
@@ -71,8 +79,9 @@ export function episodeAssetFields(file: EpisodeFile) {
 }
 
 /**
- * Одно значение ассета для файла выпуска. Всё, что указывает на папку `assets/`,
- * приводится к относительному URL (`/assets/scenes/forest.jpg`); инлайн-ассеты
+ * Одно значение ассета для файла выпуска. Всё, что указывает на корень `assets/`,
+ * приводится к относительному URL (`/assets/episodes/ep-01/scenes/forest.jpg` или
+ * `/assets/cache/scenes/forest.jpg`) и нормализуется в NFC; инлайн-ассеты
  * (`data:`), временные ссылки (`blob:`) и чужие системные пути отбрасываются —
  * лучше пустое поле, чем Base64 или путь `D:\...`, который не откроется на Маке.
  */
@@ -88,6 +97,9 @@ function cleanAssetValue(value: string, field: string, issues: AssetIssue[]) {
     return ""
   }
   const url = toAssetUrl(raw)
+  // Путь внутри корня assets/ — и постоянные выпуски (`episodes/`), и кэш
+  // (`cache/`) — валиден как есть: файл отдаёт тот же сервер, что раздаёт статику.
+  if (isAssetLibraryPath(url)) return url
   if (isSystemPath(url)) {
     issues.push({ field, reason: "system-path", sample: sampleOf(raw) })
     return ""
@@ -188,13 +200,14 @@ export function describeAssetIssues(issues: AssetIssue[]) {
 }
 
 /**
- * Выгружает встроенные ассеты в корневую папку `assets/` и заменяет data-URL на
- * относительный путь `/assets/...`. Из браузера записать файл на диск нельзя,
- * поэтому файлы кладёт локальный сервер Vite/Express — тот же, что раздаёт
- * `assets/` по URL (см. `@/lib/asset-upload`). Относительные значения не трогаем.
+ * Выгружает встроенные ассеты в папку кэша `assets/cache/` и заменяет data-URL на
+ * относительный путь `/assets/cache/...`. Из браузера записать файл на диск
+ * нельзя, поэтому файлы кладёт локальный сервер Vite/Express — тот же, что
+ * раздаёт `assets/` по URL (см. `@/lib/asset-upload`). Относительные значения не
+ * трогаем: постоянные выпуски из `assets/episodes/` перезаписи не требуют.
  *
- * Отчёт возвращается отдельно: `saved` — что легло в `assets/`, `issues` — что
- * пришлось выбросить (тогда в JSON останется пустая строка, но не Base64).
+ * Отчёт возвращается отдельно: `saved` — что легло в `assets/cache/`, `issues` —
+ * что пришлось выбросить (тогда в JSON останется пустая строка, но не Base64).
  */
 export async function persistEpisodeAssets(file: EpisodeFile) {
   const saved: string[] = []

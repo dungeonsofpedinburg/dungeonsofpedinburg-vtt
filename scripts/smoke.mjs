@@ -2,8 +2,11 @@
 // Запуск: npm run smoke
 // Sync-сервер (server/index.mjs) поднимается прямо здесь на свободном порту:
 // сокеты идут через реальный loopback, а не через моки.
+// Вторая часть — раздача и выгрузка ассетов на настоящем HTTP-сервере Vite
+// (scripts/smoke-assets.mjs): кодирование URL, кириллица, NFD, Range, кэш.
 import { createServer } from "vite"
 import { startSyncServer } from "../server/index.mjs"
+import { runAssetServerSmoke } from "./smoke-assets.mjs"
 
 const sync = await startSyncServer({
   port: 0,
@@ -30,4 +33,18 @@ try {
 } finally {
   await server.close()
   await sync.close()
+}
+
+// Ассеты выпуска: файлы из корня assets/ и выгрузка в assets/cache/.
+try {
+  const assetChecks = await runAssetServerSmoke()
+  for (const item of assetChecks) {
+    if (!item.ok) process.exitCode = 1
+    console.log(
+      `${item.ok ? "PASS" : "FAIL"} · ${item.label}${item.detail ? ` — ${item.detail}` : ""}`
+    )
+  }
+} catch (error) {
+  console.error("\n[smoke] ОШИБКА ассетов:", error?.message ?? error)
+  process.exitCode = 1
 }

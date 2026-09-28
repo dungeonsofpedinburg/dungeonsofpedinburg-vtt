@@ -2,14 +2,14 @@ import { assetFileName, extensionFromDataUrl } from "@/lib/asset-url"
 import { saveAssetToLibrary } from "@/lib/asset-upload"
 import { isVideoFile } from "@/lib/media"
 
-/** Папка видео-сцен внутри корневой `assets/` — рядом со сценами и музыкой. */
+/** Папка видео-сцен внутри кэша `assets/cache/` — рядом со сценами и музыкой. */
 export const VIDEO_FOLDER = "videos"
 
 /** Файлы больше этого размера вызывают предупреждение в диалоге. */
 const WARN_VIDEO_SIZE = 200 * 1024 * 1024
 
 export type PreparedVideo = {
-  /** Относительный путь к выгруженному файлу: `/assets/videos/bg-1-intro.mp4` */
+  /** Относительный путь к выгруженному файлу: `/assets/cache/videos/bg-1-intro.mp4` */
   src: string
   warning?: string
 }
@@ -24,7 +24,7 @@ function readAsDataUrl(file: File) {
 }
 
 /**
- * Готовит видео к хранению: файл сразу ложится в корневую папку `assets/videos`
+ * Готовит видео к хранению: файл сразу ложится в папку кэша `assets/cache/videos`
  * (его принимает локальный сервер), а в сторе остаётся только относительный путь.
  *
  * Data-URL для видео не используем намеренно: снапшот состояния уезжает на /screen

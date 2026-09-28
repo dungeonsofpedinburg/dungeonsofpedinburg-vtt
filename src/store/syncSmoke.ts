@@ -74,6 +74,7 @@ import {
 import {
   assetFileName,
   extensionFromDataUrl,
+  isAssetLibraryPath,
   isInlineAsset,
   isSystemPath,
   slugifyAssetName,
@@ -2035,6 +2036,53 @@ check(
     toAssetUrl("") === ""
 )
 
+// --- Фаза 21: две зоны корня assets/ (episodes/ — постоянное хранилище,
+// cache/ — временный кэш приложения) и кириллица macOS в форме NFD ---
+/** «й» в NFD: «и» + диакритика — так имя файла лежит на диске в macOS. */
+const NFD_AND = "\u0438\u0306"
+/** Тот же символ в NFC — в этой форме пути лежат в JSON и URL. */
+const NFC_AND = "\u0439"
+
+check(
+  "обе зоны assets/ — валидные относительные пути",
+  toAssetUrl("/assets/episodes/ep-01/scenes/forest.jpg") ===
+    "/assets/episodes/ep-01/scenes/forest.jpg" &&
+    toAssetUrl("/assets/cache/music/theme.mp3") ===
+      "/assets/cache/music/theme.mp3" &&
+    toAssetUrl("assets/episodes/ep-02/music/theme.mp3") ===
+      "/assets/episodes/ep-02/music/theme.mp3" &&
+    toAssetUrl("episodes/ep-03/scenes/forest.jpg") ===
+      "/assets/episodes/ep-03/scenes/forest.jpg" &&
+    toAssetUrl("./cache/scenes/forest.jpg") === "/assets/cache/scenes/forest.jpg",
+  toAssetUrl("episodes/ep-03/scenes/forest.jpg")
+)
+check(
+  "системный путь внутри episodes/ и cache/ становится /assets/...",
+  toAssetUrl("D:\\Выпуски\\assets\\episodes\\ep-01\\scenes\\порт в тумане.jpg") ===
+    "/assets/episodes/ep-01/scenes/порт в тумане.jpg" &&
+    toAssetUrl("/Users/me/proj/assets/cache/music/тема.mp3") ===
+      "/assets/cache/music/тема.mp3"
+)
+check(
+  "имя файла из macOS (NFD) приводится к NFC",
+  toAssetUrl(`/assets/episodes/ep-01/scenes/${NFD_AND}лка.jpg`) ===
+    `/assets/episodes/ep-01/scenes/${NFC_AND}лка.jpg` &&
+    toAssetUrl(`/assets/cache/scenes/${NFD_AND}лка.jpg`) ===
+      `/assets/cache/scenes/${NFC_AND}лка.jpg` &&
+    toAssetUrl(`D:\\Выпуски\\assets\\episodes\\${NFD_AND}лка.jpg`) ===
+      `/assets/episodes/${NFC_AND}лка.jpg`,
+  toAssetUrl(`/assets/episodes/ep-01/scenes/${NFD_AND}лка.jpg`)
+)
+check(
+  "путь внутри assets/ отличается от чужих путей и CDN",
+  isAssetLibraryPath("/assets/episodes/ep-01/scenes/forest.jpg") &&
+    isAssetLibraryPath("/assets/cache/music/theme.mp3") &&
+    !isAssetLibraryPath("/placeholders/background-1.svg") &&
+    !isAssetLibraryPath("https://cdn.example.com/x.png") &&
+    !isAssetLibraryPath("") &&
+    !isAssetLibraryPath(null)
+)
+
 // Файл выпуска, собранный на другой машине: внутри пути Windows и macOS.
 const foreignFile = parseEpisodeFile(
   JSON.stringify({
@@ -2260,6 +2308,44 @@ check(
     "backgrounds[0].src:inline, characters[0].fullBodyPngSrc:system-path, " +
       "tracks[0].audioSrc:session-url, tracks[0].coverSrc:inline",
   dirtyResult.issues.map((issue) => issue.reason).join(",")
+)
+
+// Постоянные выпуски (`episodes/`) и кэш (`cache/`) — обе зоны проходят
+// санитизацию без изменений: файлы отдаёт тот же сервер, что раздаёт статику.
+const zonedFile: EpisodeFile = {
+  backgrounds: [
+    {
+      id: "bg-zone",
+      title: "Из постоянного выпуска",
+      src: "episodes/ep-01/scenes/порт в тумане.jpg",
+      actGroup: "Завязка",
+      isBattlemap: false,
+    },
+  ],
+  characters: [],
+  tracks: [
+    {
+      id: "track-zone",
+      title: "Из кэша",
+      artist: "Автор",
+      duration: "1:00",
+      tag: "Прочее",
+      audioSrc: `/assets/cache/music/${NFD_AND}лка.mp3`,
+      coverSrc: "",
+    },
+  ],
+  mapTokens: [],
+  sceneNotes: {},
+}
+const zonedResult = sanitizeEpisodeForExport(zonedFile)
+check(
+  "sanitize сохраняет пути episodes/ и cache/, приводя их к NFC",
+  zonedResult.issues.length === 0 &&
+    zonedResult.file.backgrounds[0].src ===
+      "/assets/episodes/ep-01/scenes/порт в тумане.jpg" &&
+    zonedResult.file.tracks[0].audioSrc ===
+      `/assets/cache/music/${NFC_AND}лка.mp3`,
+  zonedResult.file.tracks[0].audioSrc
 )
 
 let dirtyRejected = false

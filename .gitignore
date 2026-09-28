@@ -7,26 +7,49 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Dependencies & Build
 node_modules
 dist
 dist-ssr
 *.local
+.tmp*
+
+# Временные триггеры сервера
+_trigger.json
 
 # Ассеты 3D-кубиков копирует postinstall @3d-dice/dice-box
 public/assets
 
-# Игнорировать пользовательские медиафайлы выпуска: сцены, персонажи, музыка,
-# предметы, саундпад и видео грузятся из панели Мастера и весят сотни мегабайт —
-# в репозиторий они не нужны. Пустая структура папок держится файлами .gitkeep.
+# ==========================================
+# МЕДИА-АССЕТЫ (Защита от попадания в Git)
+# ==========================================
+
+# 1. Постоянное хранилище выпусков (игнорирует всё внутри папок выпусков)
+assets/episodes/*
+!assets/episodes/.gitkeep
+
+# 2. Временный кэш приложения
+assets/cache/*
+!assets/cache/.gitkeep
+
+# 3. СТРАХОВКА: Игнорировать старые и любые прямые папки в assets/
 assets/scenes/*
 assets/characters/*
 assets/music/*
-assets/equipment/*
 assets/soundpad/*
 assets/videos/*
+assets/equipment/*
+
+# 4. СТРАХОВКА: Игнорировать любые отдельные файлы прямо в корне assets
+assets/*.*
+!assets/.gitkeep
+
+# Маркеры структуры папок ВСЕГДА остаются в репозитории
 !assets/**/.gitkeep
 
-# Editor directories and files
+# ==========================================
+# Редакторы и ОС
+# ==========================================
 .vscode/*
 !.vscode/extensions.json
 .idea

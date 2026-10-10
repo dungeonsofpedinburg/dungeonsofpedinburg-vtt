@@ -1,4 +1,4 @@
-import type { EpisodeFile } from "@/data/types"
+import type { EpisodeFile, GroupTracks } from "@/data/types"
 
 /** Префикс URL, по которому раздаются ассеты выпуска (корневая папка ./assets). */
 export const ASSETS_URL_PREFIX = "/assets/"
@@ -18,10 +18,129 @@ export const ASSETS_EPISODES_PREFIX = `${ASSETS_URL_PREFIX}episodes/`
 export const ASSETS_CACHE_PREFIX = `${ASSETS_URL_PREFIX}cache/`
 
 /**
+ * Папки медиабиблиотеки внутри корня assets/: сцены, персонажи, предметы,
+ * музыка, саундпад и видео. Тот же список разрешает сервер выгрузки
+ * (см. `ASSET_CACHE_FOLDERS` в `vite.config.ts`) — путь к файлу начинается
+ * с одной из этих папок.
+ */
+export const ASSET_MEDIA_FOLDERS = [
+  "scenes",
+  "characters",
+  "items",
+  "music",
+  "soundpad",
+  "videos",
+] as const
+
+/** Медиапапка, записанная без корня: `items/sword.png`, `scenes/forest.jpg`. */
+const MEDIA_FOLDER_PREFIX = new RegExp(`^(?:${ASSET_MEDIA_FOLDERS.join("|")})/`, "i")
+
+/**
  * Папка внутри корня assets/, записанная без самого слова `assets`:
  * `episodes/ep-01/scenes/forest.jpg`. Так пишут пути вручную собранные выпуски.
  */
 const ROOT_RELATIVE_FOLDERS = /^(?:episodes|cache)\//i
+
+/** Имя зоны с ассетами конкретного выпуска внутри корня assets/. */
+export const EPISODE_ASSETS_FOLDER = "episodes"
+
+/**
+ * Slug выпуска, если из названия не осталось ни одной безопасной буквы:
+ * папка всё равно нужна, а «пустого» имени у файловой системы нет.
+ */
+export const FALLBACK_EPISODE_SLUG = "episode-1"
+
+/** Максимальная длина slug: хватает для читаемого имени и не режет путь. */
+const EPISODE_SLUG_MAX_LENGTH = 48
+
+/**
+ * Транслитерация кириллицы для slug: «Порт в тумане» → `port-v-tumane`.
+ * Без неё русские названия вычищались бы целиком и все выпуски получали бы
+ * одинаковый запасной slug.
+ */
+const CYRILLIC_TO_LATIN: Record<string, string> = {
+  а: "a",
+  б: "b",
+  в: "v",
+  г: "g",
+  д: "d",
+  е: "e",
+  ё: "e",
+  ж: "zh",
+  з: "z",
+  и: "i",
+  й: "i",
+  к: "k",
+  л: "l",
+  м: "m",
+  н: "n",
+  о: "o",
+  п: "p",
+  р: "r",
+  с: "s",
+  т: "t",
+  у: "u",
+  ф: "f",
+  х: "h",
+  ц: "c",
+  ч: "ch",
+  ш: "sh",
+  щ: "sch",
+  ъ: "",
+  ы: "y",
+  ь: "",
+  э: "e",
+  ю: "yu",
+  я: "ya",
+  і: "i",
+  ї: "i",
+  є: "e",
+  ґ: "g",
+  ў: "u",
+}
+
+/**
+ * Идентификатор папки выпуска: только строчные латинские буквы, цифры и дефисы —
+ * имя одинаково годится для Windows, macOS, ZIP-архива и URL. Кириллица
+ * транслитерируется, остальное вычищается, длина ограничена 48 символами,
+ * пустое название даёт `episode-1`. Функция идемпотентна: уже готовый slug
+ * повторный вызов не меняет — поэтому её безопасно применять к полю из файла.
+ */
+export function generateEpisodeSlug(title: string | null | undefined) {
+  const transliterated = (title ?? "")
+    .normalize("NFC")
+    .toLowerCase()
+    .split("")
+    .map((char) => CYRILLIC_TO_LATIN[char] ?? char)
+    .join("")
+  const slug = transliterated
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, EPISODE_SLUG_MAX_LENGTH)
+    .replace(/-+$/g, "")
+  return slug || FALLBACK_EPISODE_SLUG
+}
+
+/**
+ * Папка выпуска внутри корня assets/: `episodes/<slug>/<folder>`. Именно этот
+ * путь уходит на сервер выгрузки, поэтому и картинки экспорта, и видео-сцены
+ * ложатся рядом — в папку своего выпуска, а не в общий кэш.
+ */
+export function episodeAssetFolder(slug: string, folder: string) {
+  return `${EPISODE_ASSETS_FOLDER}/${generateEpisodeSlug(slug)}/${folder}`
+}
+
+/**
+ * Веб-путь ассета выпуска: `/assets/episodes/<slug>/<folder>/<файл>`. Тем же
+ * видом путь ложится в JSON, поэтому формула одна на весь проект.
+ */
+export function buildEpisodeAssetUrl(
+  slug: string,
+  folder: string,
+  filename: string
+) {
+  return `${ASSETS_URL_PREFIX}${episodeAssetFolder(slug, folder)}/${filename}`
+}
 
 /**
  * Значения, которые уже являются ссылкой, а не путём к файлу: data-URL картинок
@@ -37,6 +156,7 @@ const KEEP_AS_IS = /^(?:data:|blob:|https?:|\/\/)/i
  *   "file:///D:/proj/assets/x.png" → "/assets/x.png"
  *   "assets/scenes/forest.jpg" → "/assets/scenes/forest.jpg"
  *   "episodes/ep-01/scenes/forest.jpg" → "/assets/episodes/ep-01/scenes/forest.jpg"
+ *   "items/sword.png" → "/assets/cache/items/sword.png"
  *
  * Значения без папки assets (например `/placeholders/*.svg` или data-URL)
  * возвращаются как есть: подставить им префикс нельзя.
@@ -62,18 +182,29 @@ export function toAssetUrl(value: string | null | undefined): string {
   if (ROOT_RELATIVE_FOLDERS.test(unified)) {
     return `${ASSETS_URL_PREFIX}${unified}`
   }
+  // Медиапапка без корня (`items/sword.png`, `characters/алхимик.png`) — так
+  // писали пути до разделения на зоны: файлы выгрузки лежат в кэше, поэтому
+  // дописываем именно его. Постоянные выпуски указывают путь целиком:
+  // `/assets/episodes/ep-01/items/sword.png`.
+  if (MEDIA_FOLDER_PREFIX.test(unified)) {
+    return `${ASSETS_URL_PREFIX}cache/${unified}`
+  }
   // Жадный `.*` — берём последнее вхождение `/assets/`: путь с вложенной папкой
   // assets/assets/x.png тоже даёт корректный URL от корня.
   return unified.replace(/^.*\/assets\//i, ASSETS_URL_PREFIX)
 }
 
 /**
- * Путь лежит внутри корня assets/ — в постоянных выпусках (`episodes/`) или в
- * кэше (`cache/`), либо прямо в его подпапках. Значения вне корня (CDN,
- * data-URL, чужой системный путь) возвращают `false`.
+ * Путь лежит в медиатеке — внутри корня assets/: в постоянных выпусках
+ * (`episodes/`), в кэше (`cache/`) или в одной из папок библиотеки (`scenes/`,
+ * `characters/`, `items/`, `music/`, `soundpad/`, `videos/`). Значения вне корня
+ * (CDN, data-URL, чужой системный путь) возвращают `false`.
  */
 export function isAssetLibraryPath(value: string | null | undefined) {
-  return (value ?? "").trim().startsWith(ASSETS_URL_PREFIX)
+  const path = (value ?? "").trim().replace(/^\.\//, "")
+  if (!path) return false
+  if (path.startsWith(ASSETS_URL_PREFIX)) return true
+  return ROOT_RELATIVE_FOLDERS.test(path) || MEDIA_FOLDER_PREFIX.test(path)
 }
 
 /**
@@ -174,16 +305,24 @@ export function assetFileName(
  * меняется — маппинг возвращает новые массивы и объекты.
  *
  * Картинка токена лежит в самом персонаже (avatarSrc/fullBodyPngSrc), поэтому
- * отдельные пути у mapTokens не нужны; sceneNotes — текст, его не трогаем.
- * Звуковой эффект саундпада (`soundpad[].src`) нормализуется как обычный ассет:
- * в файле выпуска он тоже лежит в папке `assets/` (постоянно — в `episodes/`,
- * из интерфейса — в `cache/`).
+ * отдельные пути у mapTokens не нужны; заметки актов (`groupNotes`) — текст, его
+ * не трогаем.
+ * Ассеты выпуска (`backgrounds[].src`, картинки персонажей, музыка, саундпад и
+ * треки актов) живут в папке выпуска `assets/episodes/<slug>/`: там же
+ * оказываются файлы, выгруженные из интерфейса, поэтому пути старых черновиков с
+ * `/assets/cache/...` сервер тоже продолжает находить.
  */
 export function normalizeEpisodeAssets(file: EpisodeFile): EpisodeFile {
   const backgrounds = Array.isArray(file.backgrounds) ? file.backgrounds : []
   const characters = Array.isArray(file.characters) ? file.characters : []
   const tracks = Array.isArray(file.tracks) ? file.tracks : []
   const soundpad = Array.isArray(file.soundpad) ? file.soundpad : []
+  // Треки групп: путь к файлу — такой же ассет, как музыка выпуска.
+  const groupTracks: GroupTracks = {}
+  Object.entries(file.groupTracks ?? {}).forEach(([group, track]) => {
+    if (!track) return
+    groupTracks[group] = { ...track, src: toAssetUrl(track.src) }
+  })
   return {
     ...file,
     backgrounds: backgrounds.map((item) => ({
@@ -204,5 +343,6 @@ export function normalizeEpisodeAssets(file: EpisodeFile): EpisodeFile {
       ...item,
       src: toAssetUrl(item.src),
     })),
+    groupTracks,
   }
 }

@@ -3,7 +3,7 @@ import { useEffect, useRef, type RefObject } from "react"
 import { DiceOverlay } from "@/components/dice/DiceOverlay"
 import { BattleMapGrid } from "@/components/master-panel/BattleMapGrid"
 import { Button } from "@/components/ui/button"
-import { backgroundIcons } from "@/data/seed"
+import { backgroundIcon } from "@/data/seed"
 import { ROLL_RESULT_TEXT, formatRollBreakdown } from "@/lib/dice"
 import { isVideoSrc, shouldSeekVideo } from "@/lib/media"
 import { useEpisodeStore } from "@/store/useEpisodeStore"
@@ -109,6 +109,18 @@ export function SceneStage({
         />
       ))}
 
+      {/* Пустой выпуск: сцен нет — показываем подсказку вместо чёрного поля.
+          На /screen её нет: там важна чистая прозрачность для OBS. */}
+      {backgroundLayers.length === 0 && interactive ? (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-muted/40 text-center">
+          <ImageOff className="size-8 text-muted-foreground" />
+          <p className="text-sm font-medium">Сцена не выбрана</p>
+          <p className="max-w-xs text-xs text-muted-foreground">
+            Добавьте сцену в библиотеке слева — она сразу появится в эфире
+          </p>
+        </div>
+      ) : null}
+
       {/* Затемнение идёт поверх фона И поверх сетки карты */}
       <div
         className={cn(
@@ -203,7 +215,7 @@ function SceneLayer({
   showHint: boolean
   videoRef?: RefObject<HTMLVideoElement | null>
 }) {
-  const Icon = backgroundIcons[background.id]
+  const Icon = backgroundIcon(background.id)
   const isVideo = isVideoSrc(background.src)
   // Пауза, повтор и перемотка видео: одно состояние на оба окна. Мастер меняет
   // его из плеера, /screen получает снапшотом — и оба применяют здесь.

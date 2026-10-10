@@ -1,6 +1,9 @@
 import { GRID_COLUMNS, GRID_ROWS } from "@/data/content"
 import { clampIndex, useEpisodeStore } from "@/store/useEpisodeStore"
-import { normalizeEpisodeAssets } from "@/lib/asset-url"
+import {
+  generateEpisodeSlug,
+  normalizeEpisodeAssets,
+} from "@/lib/asset-url"
 import { initialsFromName } from "@/lib/character"
 import { normalizeSoundpadIcon, soundpadTitleFallback } from "@/lib/soundpad"
 import {
@@ -19,6 +22,7 @@ import type {
   Background,
   Character,
   EpisodeFile,
+  GroupTracks,
   MapToken,
   SceneNotes,
   SoundpadSlot,
@@ -30,14 +34,15 @@ const TOKEN_CATEGORIES = ["hero", "npc", "enemy", "item"]
 
 /**
  * Снимок выпуска «как есть»: состояние стора плюс приведение путей к
- * относительным URL от корня assets/ (`/assets/scenes/harbor.png`). Встроенные
- * ассеты (data-URL) на этом шаге ещё остаются: их выгружает в папку `assets/`
- * экспорт — см. `exportEpisodeFile`.
+ * относительным URL от корня assets/ (`/assets/episodes/<slug>/scenes/...`).
+ * Встроенные ассеты (data-URL) на этом шаге ещё остаются: их выгружает в папку
+ * выпуска экспорт — см. `exportEpisodeFile`.
  */
 export function buildEpisodeSnapshot(): EpisodeFile {
   const state = useEpisodeStore.getState()
   return normalizeEpisodeAssets({
     exportedAt: new Date().toISOString(),
+    episodeSlug: state.episodeSlug,
     campaign: state.episodeTitle,
     backgrounds: state.backgrounds,
     sceneGroups: state.sceneGroups,
@@ -45,7 +50,8 @@ export function buildEpisodeSnapshot(): EpisodeFile {
     tracks: state.tracks,
     soundpad: state.soundpad,
     mapTokens: state.mapTokens,
-    sceneNotes: state.sceneNotes,
+    groupNotes: state.groupNotes,
+    groupTracks: state.groupTracks,
     activeBackgroundId: state.activeBackgroundId,
     activeCharacterId: state.activeCharacterId,
     activeMapId: state.activeMapId,
@@ -64,14 +70,16 @@ export function buildEpisodeFile(): EpisodeFile {
 
 /** Отчёт об экспорте: файл уже собран и готов к сохранению. */
 export type EpisodeExportReport = {
-  /** Имя файла выпуска: `pedinburg-Порт в тумане.json` */
+  /** Имя файла выпуска: совпадает со slug папки ассетов — `port-v-tumane.json` */
   fileName: string
+  /** Папка выпуска внутри `assets/`: `episodes/port-v-tumane` */
+  episodeSlug: string
   /** Готовый JSON выпуска */
   json: string
   bytes: number
   /** Размер в человекочитаемом виде: «412 КБ» */
   size: string
-  /** Ассеты, выгруженные в корневую папку `assets/` при этом экспорте */
+  /** Ассеты, выгруженные в папку выпуска при этом экспорте */
   savedAssets: string[]
   /** Поля, которые остались без ассета — с причиной (Base64, чужой путь) */
   issues: AssetIssue[]
@@ -79,16 +87,19 @@ export type EpisodeExportReport = {
 
 /**
  * Полный экспорт выпуска по стандарту передачи: сначала встроенные ассеты ложатся
- * файлами в корневую папку `assets/` (её передают вместе с JSON), затем
- * собирается сам JSON — только относительные пути. Папку `assets/` на второй
- * машине кладут в корень проекта, и пути `/assets/...` работают сразу.
+ * файлами в папку выпуска `assets/episodes/<slug>/`, затем собирается сам JSON —
+ * только относительные пути. Папку выпуска архивируют целиком
+ * (`<slug>.zip`) и передают Мастеру вместе с `<slug>.json`: он распаковывает её в
+ * `assets/episodes/`, и пути `/assets/episodes/<slug>/...` работают сразу.
  */
 export async function exportEpisodeFile(): Promise<EpisodeExportReport> {
+  const snapshot = buildEpisodeSnapshot()
+  const episodeSlug = generateEpisodeSlug(snapshot.episodeSlug ?? snapshot.campaign)
   const {
     file: persisted,
     saved,
     issues: uploadIssues,
-  } = await persistEpisodeAssets(buildEpisodeSnapshot())
+  } = await persistEpisodeAssets(snapshot, episodeSlug)
   const { file, issues: sanitizeIssues } = sanitizeEpisodeForExport(persisted)
   // Поля ассетов уже очищены — это последняя страховка перед записью файла.
   assertNoInlineAssets(file)
@@ -106,7 +117,8 @@ export async function exportEpisodeFile(): Promise<EpisodeExportReport> {
   }
 
   return {
-    fileName: episodeFileName(file.campaign ?? ""),
+    fileName: episodeFileName(episodeSlug),
+    episodeSlug,
     json,
     bytes,
     size: formatAssetSize(bytes),
@@ -117,8 +129,8 @@ export async function exportEpisodeFile(): Promise<EpisodeExportReport> {
 
 /**
  * Экспорт выпуска по кнопке: собирает файл (см. `exportEpisodeFile`) и отдаёт его
- * браузеру на скачивание. Папку `assets/` Мастер передаёт вместе с JSON — она
- * лежит в корне проекта, поэтому относительные пути в файле уже рабочие.
+ * браузеру на скачивание. Папку выпуска Мастер передаёт вместе с JSON — она
+ * лежит в `assets/episodes/`, поэтому относительные пути в файле уже рабочие.
  */
 export async function downloadEpisodeFile() {
   const report = await exportEpisodeFile()
@@ -129,34 +141,20 @@ export async function downloadEpisodeFile() {
   link.download = report.fileName
   link.click()
   URL.revokeObjectURL(url)
-  console.info(`[выпуск] ${report.fileName} — ${report.size}`)
+  console.info(
+    `[выпуск] ${report.fileName} — ${report.size} (папка assets/episodes/${report.episodeSlug}/)`
+  )
   return report
 }
 
 /**
- * Имя JSON-файла выпуска: берём название выпуска («Порт в тумане» →
- * `pedinburg-Порт в тумане.json`), а если оно пустое — запасное имя по дате.
+ * Имя JSON-файла выпуска: это тот же slug, что у папки ассетов, поэтому архив
+ * `<slug>.zip` и файл `<slug>.json` всегда лежат рядом и не путаются. Slug —
+ * уже безопасная строка, но приводим её к канону: пустое значение даёт
+ * `episode-1.json`.
  */
-export function episodeFileName(title: string) {
-  const slug = sanitizeFileNamePart(title)
-  if (!slug) {
-    return `pedinburg-episode-${new Date().toISOString().slice(0, 10)}.json`
-  }
-  return `pedinburg-${slug}.json`
-}
-
-/** Символы, недопустимые в имени файла Windows. */
-const FORBIDDEN_FILE_CHARS = '\\/:*?"<>|'
-
-/** Убирает из названия символы, недопустимые в имени файла. */
-function sanitizeFileNamePart(value: string) {
-  let clean = ""
-  for (const char of value) {
-    const code = char.codePointAt(0) ?? 0
-    // Управляющие символы (код < 32) в именах файлов тоже запрещены.
-    clean += code < 0x20 || FORBIDDEN_FILE_CHARS.includes(char) ? " " : char
-  }
-  return clean.replace(/\s+/g, " ").trim().slice(0, 80).replace(/[. ]+$/, "")
+export function episodeFileName(episodeSlug: string) {
+  return `${generateEpisodeSlug(episodeSlug)}.json`
 }
 
 /**
@@ -177,20 +175,31 @@ export function parseEpisodeFile(text: string): EpisodeFile {
 
   const backgrounds = parseBackgrounds(parsed.backgrounds)
   // Для файлов старого формата (без mapId у токенов) — первая карта местности.
+  // У пустого выпуска карт нет: токены тогда просто не создаются.
   const fallbackMapId =
-    backgrounds.find((item) => item.isBattlemap)?.id ?? backgrounds[0].id
+    backgrounds.find((item) => item.isBattlemap)?.id ?? backgrounds[0]?.id ?? ""
+  const sceneGroups = parseSceneGroups(parsed.sceneGroups, backgrounds)
 
   return {
     backgrounds,
-    sceneGroups: parseSceneGroups(parsed.sceneGroups, backgrounds),
+    sceneGroups,
     characters: parseCharacters(parsed.characters),
     tracks: parseTracks(parsed.tracks),
     soundpad: parseSoundpad(parsed.soundpad),
     mapTokens: parseTokens(parsed.mapTokens, fallbackMapId),
-    sceneNotes: parseSceneNotes(parsed.sceneNotes),
+    // Заметки — по группам сцен; файлы старого формата хранят их по сценам.
+    groupNotes: parseGroupNotes(
+      parsed.groupNotes,
+      parsed.sceneNotes,
+      backgrounds,
+      sceneGroups
+    ),
+    groupTracks: parseGroupTracks(parsed.groupTracks),
     campaign: asOptionalString(parsed.campaign) ?? undefined,
-    activeBackgroundId:
-      asOptionalString(parsed.activeBackgroundId) ?? undefined,
+    // Слаг папки выпуска: в старых файлах поля нет — стор выведет его из названия.
+    episodeSlug: asOptionalString(parsed.episodeSlug) ?? undefined,
+    // Сцены в эфире может не быть: пустой выпуск — это нормальное состояние.
+    activeBackgroundId: asOptionalString(parsed.activeBackgroundId),
     activeCharacterId: asOptionalString(parsed.activeCharacterId),
     activeMapId: asOptionalString(parsed.activeMapId),
   }
@@ -261,10 +270,9 @@ function parseBackgrounds(value: unknown): Background[] {
   if (!Array.isArray(value)) {
     throw new Error("В файле нет массива фонов")
   }
+  // Пустой список сцен — тоже выпуск (например только сохранённый шаблон):
+  // раньше это считалось ошибкой, но чистый старт начинается именно так.
   const items = value.filter(isRecord).slice(0, 400)
-  if (items.length === 0) {
-    throw new Error("Список фонов пуст")
-  }
   return items.map((item, index) => ({
     id: asString(item.id) || `bg-import-${index}`,
     title: asString(item.title) || `Сцена ${index + 1}`,
@@ -356,11 +364,57 @@ function parseTokens(value: unknown, fallbackMapId: string): MapToken[] {
   })
 }
 
-function parseSceneNotes(value: unknown): SceneNotes {
-  if (!isRecord(value)) return {}
+/**
+ * Заметки по группам сцен. Новый формат пишет их в `groupNotes` (ключ — имя
+ * группы). Файлы старого формата хранят заметки по сценам (`sceneNotes`, ключ —
+ * id сцены): переносим их на акт сцены — по одной заметке на группу, первая
+ * непустая побеждает.
+ */
+function parseGroupNotes(
+  value: unknown,
+  legacyValue: unknown,
+  backgrounds: Background[],
+  sceneGroups: string[]
+): SceneNotes {
+  if (isRecord(value)) {
+    const notes: SceneNotes = {}
+    Object.entries(value).forEach(([key, note]) => {
+      const name = key.trim()
+      if (name && typeof note === "string") notes[name] = note
+    })
+    return notes
+  }
+  if (!isRecord(legacyValue)) return {}
+
+  const groupBySceneId = new Map(
+    backgrounds.map((background) => [background.id, background.actGroup])
+  )
   const notes: SceneNotes = {}
-  Object.entries(value).forEach(([key, note]) => {
-    if (typeof note === "string") notes[key] = note
+  Object.entries(legacyValue).forEach(([key, note]) => {
+    if (typeof note !== "string" || !note.trim()) return
+    // Ключ старого файла — id сцены; если сцена пропала, ключ может быть уже
+    // именем группы (так выглядят файлы промежуточных версий).
+    const group = groupBySceneId.get(key) ?? (sceneGroups.includes(key) ? key : "")
+    if (!group) return
+    if (!notes[group]?.trim()) notes[group] = note
   })
   return notes
+}
+
+/** Треки, привязанные к группам сцен: чужие и пустые записи отбрасываем. */
+function parseGroupTracks(value: unknown): GroupTracks {
+  if (!isRecord(value)) return {}
+  const tracks: GroupTracks = {}
+  Object.entries(value).forEach(([key, track]) => {
+    const name = key.trim()
+    if (!name || !isRecord(track)) return
+    const src = asString(track.src)
+    if (!src) return
+    tracks[name] = {
+      id: asString(track.id) || `group-track-${name}`,
+      title: asString(track.title) || name,
+      src,
+    }
+  })
+  return tracks
 }

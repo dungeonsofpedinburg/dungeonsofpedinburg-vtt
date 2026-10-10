@@ -3,6 +3,7 @@ import {
   createReadStream,
   existsSync,
   mkdirSync,
+  readdirSync,
   statSync,
   writeFileSync,
 } from 'node:fs'
@@ -19,21 +20,43 @@ import { defineConfig, type Plugin } from 'vite'
 const ASSETS_URL_PREFIX = '/assets/'
 
 /**
- * Папка временного кэша внутри `./assets/`: сюда эндпоинт выгрузки кладёт файлы,
- * загруженные «на лету» из интерфейса (картинки сцен и токенов, музыка,
- * саундпад, видео-фоны, выгрузка Base64). Постоянное хранилище выпусков —
- * `./assets/episodes/`: его наполняют вручную, и эндпоинт туда не пишет никогда.
- * Кэш можно стереть целиком: подпапки создадутся заново при первой выгрузке.
+ * Папка временного кэша внутри `./assets/`. Ассеты выпуска эндпоинт выгрузки
+ * кладёт в папку выпуска (`./assets/episodes/<slug>/`), а сюда попадает только
+ * наследие: запросы с коротким путём (`scenes/...`) и файлы старых черновиков.
+ * Кэш можно стереть целиком — подпапки создадутся заново, если такой запрос придёт.
  */
 const ASSETS_CACHE_FOLDER = 'cache'
 
-/** URL-префикс кэша: `/assets/cache/...` — его получает клиент в ответе выгрузки. */
-const ASSETS_CACHE_URL_PREFIX = `${ASSETS_URL_PREFIX}${ASSETS_CACHE_FOLDER}/`
+/** Зона с папками выпусков: `assets/episodes/<slug>/<медиапапка>/<файл>`. */
+const ASSETS_EPISODES_FOLDER = 'episodes'
+
+/**
+ * Слаг папки выпуска: только строчные латинские буквы, цифры и дефисы (см.
+ * `generateEpisodeSlug` в `src/lib/asset-url.ts`). Дефис не может стоять первым,
+ * `..` и разделители путей в такой строке невозможны — это и есть защита от
+ * подмены папки выпуска.
+ */
+const EPISODE_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,47}$/
+
+/**
+ * Подпапки ассетов внутри зоны: сцены, персонажи, предметы, музыка, саундпад и
+ * видео. Приложение создаёт их автоматически. Список — последний барьер
+ * эндпоинта выгрузки: файл в произвольной подпапке отклоняется ответом 400.
+ */
+const MEDIA_FOLDERS = new Set([
+  'scenes',
+  'characters',
+  'items',
+  'music',
+  'soundpad',
+  'videos',
+])
 
 /**
  * Эндпоинт выгрузки ассетов выпуска: Мастер выбирает картинки и музыку в
- * браузере, а файлы ложатся в папку кэша `./assets/cache/` — из JSON на них едет
- * только относительный путь. Без этого шага файл выпуска раздувался бы Base64.
+ * браузере, а файлы ложатся в папку выпуска `./assets/episodes/<slug>/` — из JSON
+ * на них едет только относительный путь. Без этого шага файл выпуска раздувался
+ * бы Base64, а папку выпуска нельзя было бы передать Мастеру целиком.
  */
 const ASSET_UPLOAD_ENDPOINT = '/__pedinburg/assets'
 
@@ -188,40 +211,78 @@ function readRequestBody(req: IncomingMessage) {
 }
 
 /**
- * Путь внутри папки кэша для принимаемого файла или `null`, если путь
- * небезопасен: выход за папку (`..`), буква диска, обратные слеши, имя без
- * известного расширения. Расширения сверяем с таблицей MIME — так в папку
- * ассетов не попадёт ничего исполняемого.
- *
- * Запись возможна только в кэш: путь к постоянным выпускам (`../episodes/...`)
- * отсекается проверкой вложенности, а не «договорённостью» с клиентом.
+ * Сегменты пути ассета из тела запроса или из ответа клиента — или `null`, если
+ * путь небезопасен: выход за папку (`..`), буква диска, спецсимволы Windows и
+ * macOS, пустые имена. Слеши приводятся к `/`, префикс `assets/` и ведущие `/`
+ * снимаются: путь всегда считается от корня `assets/`.
  */
-function resolveCacheFilePath(cacheRoot: string, relativePath: string) {
-  if (!relativePath || UNSAFE_ASSET_PATH.test(relativePath)) return null
-  if (hasControlChars(relativePath)) return null
-  const segments = relativePath.split('/')
-  if (segments.some((part) => part === '' || part === '.' || part === '..')) return null
-  const extension = path.extname(relativePath).toLowerCase()
-  if (!(extension in ASSET_MIME_TYPES)) return null
-  const filePath = path.resolve(cacheRoot, relativePath)
-  // Второй барьер к `..`: итоговый путь обязан остаться внутри кэша.
-  if (!filePath.startsWith(cacheRoot + path.sep)) return null
-  return filePath
-}
-
-/**
- * Путь из тела запроса внутрь кэша. Клиент присылает `scenes/forest.jpg`, но
- * полную форму (`/assets/cache/scenes/forest.jpg`) тоже принимаем: эндпоинт не
- * должен зависеть от того, какая запись пути сложилась в вызывающем коде.
- * Префиксы снимаем до проверки безопасности — итоговый путь всё равно обязан
- * остаться внутри `assets/cache/`.
- */
-function toCacheRelativePath(value: string) {
-  return value
+function toAssetSegments(value: string) {
+  const normalized = value
+    .normalize('NFC')
     .replace(/\\/g, '/')
     .replace(/^\/+/, '')
     .replace(/^assets\//i, '')
-    .replace(/^cache\//i, '')
+  if (!normalized || UNSAFE_ASSET_PATH.test(normalized)) return null
+  if (hasControlChars(normalized)) return null
+  const segments = normalized.split('/')
+  if (segments.some((part) => part === '' || part === '.' || part === '..')) return null
+  return segments
+}
+
+/**
+ * Ключ запасного поиска для «старых» адресов: `cache/scenes/x.png` и короткий
+ * `scenes/x.png` дают один и тот же ключ `scenes/x.png` — по нему файл ищут в
+ * кэше, а затем в папках выпусков. Для пути выпуска (`episodes/...`) возвращает
+ * `null`: там адрес точный, и подставлять файл из другого выпуска было бы ошибкой.
+ */
+function cacheSearchKey(relativePath: string) {
+  const normalized = relativePath.replace(/\\/g, '/').replace(/^\/+/, '')
+  const segments = normalized.split('/')
+  const folder = segments[0]?.toLowerCase() ?? ''
+  if (folder === ASSETS_CACHE_FOLDER) return segments.slice(1).join('/')
+  if (MEDIA_FOLDERS.has(folder)) return normalized
+  return null
+}
+
+/**
+ * Файл внутри корня `assets/`, куда кладётся принятый ассет. Принимаем три формы
+ * пути (все — от корня `assets/`):
+ *
+ * * `episodes/<slug>/scenes/forest.jpg` — папка конкретного выпуска (экспорт);
+ * * `cache/scenes/forest.jpg` — папка кэша (временные загрузки, видео-сцены);
+ * * `scenes/forest.jpg` — короткая запись, её кладём в кэш (наследие).
+ *
+ * Возвращает `{ filePath, url }` или `null`. Проверки строгие: слаг выпуска —
+ * только `[a-z0-9-]`, подпапка — из списка `MEDIA_FOLDERS`, расширение — из
+ * таблицы MIME, а итоговый путь обязан остаться внутри `assets/`.
+ */
+function resolveTargetFilePath(assetsRoot: string, targetPath: string) {
+  const segments = toAssetSegments(targetPath)
+  if (!segments) return null
+  const extension = path.extname(segments[segments.length - 1]).toLowerCase()
+  if (!(extension in ASSET_MIME_TYPES)) return null
+
+  let relativeToAssets: string
+  if (segments[0].toLowerCase() === ASSETS_EPISODES_FOLDER) {
+    // episodes/<slug>/<медиапапка>/<файл>: папка выпуска указывается явно.
+    const [, slug, folder] = segments
+    if (segments.length < 4) return null
+    if (!EPISODE_SLUG_PATTERN.test(slug ?? '')) return null
+    if (!MEDIA_FOLDERS.has((folder ?? '').toLowerCase())) return null
+    relativeToAssets = segments.join('/')
+  } else {
+    // Короткий путь и явный `cache/...` — обе формы живут в кэше.
+    const rest =
+      segments[0].toLowerCase() === ASSETS_CACHE_FOLDER ? segments.slice(1) : segments
+    if (rest.length < 2) return null
+    if (!MEDIA_FOLDERS.has((rest[0] ?? '').toLowerCase())) return null
+    relativeToAssets = [ASSETS_CACHE_FOLDER, ...rest].join('/')
+  }
+
+  const filePath = path.resolve(assetsRoot, relativeToAssets)
+  // Барьер к `..`: итоговый путь обязан остаться внутри корня assets/.
+  if (!filePath.startsWith(assetsRoot + path.sep)) return null
+  return { filePath, url: `${ASSETS_URL_PREFIX}${relativeToAssets}` }
 }
 
 /**
@@ -244,16 +305,93 @@ function resolveExistingAssetPath(assetsRoot: string, relativePath: string) {
   return null
 }
 
+/** Сколько папок обходит запасной поиск, прежде чем сдаться (выпусков бывает много). */
+const EPISODE_SEARCH_LIMIT = 2000
+
+/**
+ * Обход `assets/episodes/**` в поисках файла с нужным именем. Нужен файлам
+ * выпусков, собранным до разделения на папки: в JSON у них путь
+ * `/assets/cache/scenes/forest.jpg`, а сам файл лежит в папке выпуска.
+ * Сравнение имён идёт в NFC — macOS хранит кириллицу в NFD.
+ */
+function findFileInEpisodes(episodesRoot: string, fileName: string) {
+  const wanted = fileName.normalize('NFC')
+  let visited = 0
+  const walk = (dir: string, relative: string): string | null => {
+    if (visited >= EPISODE_SEARCH_LIMIT) return null
+    visited += 1
+    let entries
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      // Папку убрали во время обхода — просто пропускаем её.
+      return null
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue
+      const nextRelative = relative ? `${relative}/${entry.name}` : entry.name
+      if (entry.isDirectory()) {
+        const found = walk(path.join(dir, entry.name), nextRelative)
+        if (found) return found
+        continue
+      }
+      if (entry.name.normalize('NFC') === wanted) {
+        return resolveExistingAssetPath(episodesRoot, nextRelative)
+      }
+    }
+    return null
+  }
+  if (!existsSync(episodesRoot)) return null
+  return walk(episodesRoot, '')
+}
+
+/**
+ * Запасной поиск ассета по пути внутри кэша (`scenes/forest.jpg`). Сначала
+ * пробуем точное совпадение `<выпуск>/<тот же путь>`, затем ищем файл с таким
+ * именем в любой папке выпусков. Результат кэшируется: проигрыватель просит один
+ * и тот же файл многократно, а обход дерева не бесплатный.
+ */
+function createEpisodeAssetLookup(assetsRoot: string) {
+  const episodesRoot = path.resolve(assetsRoot, ASSETS_EPISODES_FOLDER)
+  const cache = new Map<string, string | null>()
+  return (cacheRelativePath: string) => {
+    const cached = cache.get(cacheRelativePath)
+    if (cached !== undefined) return cached
+
+    const segments = toAssetSegments(cacheRelativePath)
+    let found: string | null = null
+    if (segments) {
+      const wanted = segments.join('/')
+      // 1. Точный путь внутри каждого выпуска: `<выпуск>/scenes/forest.jpg`.
+      try {
+        for (const entry of readdirSync(episodesRoot, { withFileTypes: true })) {
+          if (!entry.isDirectory() || entry.name.startsWith('.')) continue
+          found = resolveExistingAssetPath(episodesRoot, `${entry.name}/${wanted}`)
+          if (found) break
+        }
+      } catch {
+        found = null
+      }
+      // 2. Полный обход: файл мог лежать в другой подпапке того же выпуска.
+      if (!found) found = findFileInEpisodes(episodesRoot, segments[segments.length - 1])
+    }
+
+    cache.set(cacheRelativePath, found)
+    return found
+  }
+}
+
 /**
  * Приём ассета выпуска от Мастера: раскодирует data-URL из тела запроса и кладёт
- * файл в папку кэша `assets/cache/`, чтобы в JSON выпуска уехал относительный
- * путь (`/assets/cache/scenes/forest.jpg`), а не Base64 на сто мегабайт. Папки
- * кэша создаются автоматически — их можно стереть, загрузка их вернёт.
+ * файл в папку выпуска `assets/episodes/<slug>/<медиапапка>/` (или в кэш, если
+ * клиент прислал короткий путь), чтобы в JSON уехал относительный путь
+ * (`/assets/episodes/<slug>/scenes/forest.jpg`), а не Base64 на сто мегабайт.
+ * Папки создаются автоматически, файл можно перезаписать повторным экспортом.
  */
 async function handleAssetUpload(
   req: IncomingMessage,
   res: ServerResponse,
-  cacheRoot: string
+  assetsRoot: string
 ) {
   try {
     const body = JSON.parse(await readRequestBody(req)) as {
@@ -264,10 +402,8 @@ async function handleAssetUpload(
       sendJson(res, 400, { error: 'нужны поля path и dataUrl' })
       return
     }
-    // Обратно в URL уезжает канонический NFC: тем же видом пути лежат в JSON.
-    const relativePath = toCacheRelativePath(body.path).normalize('NFC')
-    const filePath = resolveCacheFilePath(cacheRoot, relativePath)
-    if (!filePath) {
+    const target = resolveTargetFilePath(assetsRoot, body.path)
+    if (!target) {
       sendJson(res, 400, { error: 'недопустимый путь ассета' })
       return
     }
@@ -281,12 +417,9 @@ async function handleAssetUpload(
       sendJson(res, 400, { error: 'пустой файл' })
       return
     }
-    mkdirSync(path.dirname(filePath), { recursive: true })
-    writeFileSync(filePath, file)
-    sendJson(res, 200, {
-      url: `${ASSETS_CACHE_URL_PREFIX}${relativePath}`,
-      bytes: file.length,
-    })
+    mkdirSync(path.dirname(target.filePath), { recursive: true })
+    writeFileSync(target.filePath, file)
+    sendJson(res, 200, { url: target.url, bytes: file.length })
   } catch (error) {
     if (error instanceof RequestTooLargeError) {
       // 413 — «файл слишком большой»: так браузер видит понятную причину,
@@ -306,19 +439,20 @@ async function handleAssetUpload(
  * Отдаёт файлы из корневой папки `assets/` по URL `/assets/...` — и в dev, и в
  * preview. Без этого пути из JSON выпуска работали бы только в dev (Vite отдаёт
  * файлы корня проекта неявно) и падали с 404 в preview, где есть только dist.
- * Так закрыты обе зоны: постоянные выпуски (`/assets/episodes/...`) и кэш
+ * Так закрыты обе зоны: папки выпусков (`/assets/episodes/<slug>/...`) и кэш
  * (`/assets/cache/...`). Тот же middleware принимает POST `/__pedinburg/assets` —
- * запись ассетов выпуска в кэш.
+ * запись ассетов в папку выпуска или в кэш.
  */
 function createEpisodeAssetsMiddleware(assetsRoot: string) {
-  const cacheRoot = path.resolve(assetsRoot, ASSETS_CACHE_FOLDER)
+  // Запасной поиск в папках выпусков: старые черновики хранят пути `/assets/cache/...`.
+  const lookupEpisodeAsset = createEpisodeAssetLookup(assetsRoot)
   return (req: IncomingMessage, res: ServerResponse, next: () => void) => {
     if (req.url?.startsWith(ASSET_UPLOAD_ENDPOINT)) {
       if (req.method !== 'POST') {
         sendJson(res, 405, { error: 'нужен метод POST' })
         return
       }
-      void handleAssetUpload(req, res, cacheRoot)
+      void handleAssetUpload(req, res, assetsRoot)
       return
     }
     if (req.method !== 'GET' && req.method !== 'HEAD') return next()
@@ -338,12 +472,18 @@ function createEpisodeAssetsMiddleware(assetsRoot: string) {
     if (!requestPath.startsWith(ASSETS_URL_PREFIX)) return next()
 
     const relativePath = requestPath.slice(ASSETS_URL_PREFIX.length)
+    const searchKey = cacheSearchKey(relativePath)
     const filePath =
       resolveExistingAssetPath(assetsRoot, relativePath) ??
-      // Наследие: до разделения на `episodes/` и `cache/` файлы лежали прямо в
-      // `assets/scenes`, `assets/music` и т.д. Файл выпуска, собранный тогда,
-      // продолжает открываться — ищем тот же путь внутри кэша.
-      resolveExistingAssetPath(assetsRoot, `${ASSETS_CACHE_FOLDER}/${relativePath}`)
+      // Наследие: путь без зоны (`/assets/scenes/forest.jpg`) и старый черновик
+      // с `/assets/cache/...` — ищем файл в кэше, а затем в папках выпусков:
+      // продюсер мог уже передать готовую папку `assets/episodes/<slug>/`.
+      (searchKey
+        ? (resolveExistingAssetPath(
+            assetsRoot,
+            `${ASSETS_CACHE_FOLDER}/${searchKey}`
+          ) ?? lookupEpisodeAsset(searchKey))
+        : null)
     if (!filePath) return next()
     const stats = statSync(filePath)
     if (!stats.isFile()) return next()

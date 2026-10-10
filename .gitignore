@@ -31,10 +31,17 @@ assets/episodes/*
 # 2. Временный кэш приложения
 assets/cache/*
 !assets/cache/.gitkeep
+# Подпапки кэша (scenes, characters, items, music, soundpad, videos) держим в
+# репозитории маркерами: без снятия игнора с самой папки git не вернёт файл
+# внутрь игнорируемого каталога, а медиа внутри остаётся вне Git.
+!assets/cache/*/
+assets/cache/*/*
+!assets/cache/*/.gitkeep
 
 # 3. СТРАХОВКА: Игнорировать старые и любые прямые папки в assets/
 assets/scenes/*
 assets/characters/*
+assets/items/*
 assets/music/*
 assets/soundpad/*
 assets/videos/*

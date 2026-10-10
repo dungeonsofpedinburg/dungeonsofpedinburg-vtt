@@ -1,15 +1,22 @@
-import { assetFileName, extensionFromDataUrl } from "@/lib/asset-url"
+import {
+  assetFileName,
+  episodeAssetFolder,
+  extensionFromDataUrl,
+} from "@/lib/asset-url"
 import { saveAssetToLibrary } from "@/lib/asset-upload"
 import { isVideoFile } from "@/lib/media"
 
-/** Папка видео-сцен внутри кэша `assets/cache/` — рядом со сценами и музыкой. */
+/** Папка видео-сцен внутри папки выпуска: `assets/episodes/<slug>/videos`. */
 export const VIDEO_FOLDER = "videos"
 
 /** Файлы больше этого размера вызывают предупреждение в диалоге. */
 const WARN_VIDEO_SIZE = 200 * 1024 * 1024
 
 export type PreparedVideo = {
-  /** Относительный путь к выгруженному файлу: `/assets/cache/videos/bg-1-intro.mp4` */
+  /**
+   * Относительный путь к выгруженному файлу внутри папки выпуска:
+   * `/assets/episodes/port-v-tumane/videos/bg-1-intro.mp4`
+   */
   src: string
   warning?: string
 }
@@ -24,8 +31,10 @@ function readAsDataUrl(file: File) {
 }
 
 /**
- * Готовит видео к хранению: файл сразу ложится в папку кэша `assets/cache/videos`
- * (его принимает локальный сервер), а в сторе остаётся только относительный путь.
+ * Готовит видео к хранению: файл сразу ложится в папку выпуска
+ * `assets/episodes/<slug>/videos` (его принимает локальный сервер), а в сторе
+ * остаётся только относительный путь. Так архив выпуска самодостаточен: видео
+ * уезжает Мастеру вместе с папкой, а не остаётся в кэше Продюсера.
  *
  * Data-URL для видео не используем намеренно: снапшот состояния уезжает на /screen
  * по WebSocket (`useEpisodeSync`), и строка на десятки мегабайт положила бы
@@ -33,7 +42,7 @@ function readAsDataUrl(file: File) {
  */
 export async function prepareVideoFile(
   file: File,
-  options: { id: string; label: string }
+  options: { id: string; label: string; episodeSlug: string }
 ): Promise<PreparedVideo> {
   if (!isVideoFile(file)) {
     throw new Error("Нужен видеофайл: MP4 или WebM")
@@ -45,11 +54,15 @@ export async function prepareVideoFile(
     options.label,
     extensionFromDataUrl(dataUrl)
   )
-  const upload = await saveAssetToLibrary(VIDEO_FOLDER, fileName, dataUrl)
+  const upload = await saveAssetToLibrary(
+    episodeAssetFolder(options.episodeSlug, VIDEO_FOLDER),
+    fileName,
+    dataUrl
+  )
   if (!upload.ok) {
     // Причина приходит от сервера («файл слишком большой…») или из сети — показываем
     // её как есть, без советов запускать лишние команды.
-    throw new Error(`Файл не выложился в папку assets: ${upload.error}`)
+    throw new Error(`Файл не выложился в папку этого выпуска: ${upload.error}`)
   }
   const src = upload.url
 

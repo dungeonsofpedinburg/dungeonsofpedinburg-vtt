@@ -4,12 +4,19 @@ import {
   GRID_COLUMNS,
   GRID_ROWS,
   TOKEN_CELL_RATIO,
+  campaign,
   gridCellPercent,
   gridGeometry,
   gridOffsetPercent,
   tokenCategories,
 } from "@/data/content"
 import { resolveCellFromPoint } from "@/hooks/useGridDrop"
+import {
+  resolveGroupTrackAction,
+  shouldResumeGroupTrack,
+} from "@/lib/group-track"
+import { SMOKE_EPISODE } from "@/store/smokeFixtures"
+import { actGroups } from "@/data/seed"
 import {
   categoryBorders,
   compactTokenBorders,
@@ -63,8 +70,10 @@ import {
   parseEpisodeFile,
 } from "@/lib/episode-io"
 import {
+  ASSET_FOLDERS,
   EPISODE_JSON_LIMIT_BYTES,
   assertNoInlineAssets,
+  characterAssetFolder,
   episodeAssetFields,
   episodeJsonBytes,
   findInlineAssetLeak,
@@ -72,8 +81,13 @@ import {
   sanitizeEpisodeForExport,
 } from "@/lib/export-episode"
 import {
+  ASSET_MEDIA_FOLDERS,
+  FALLBACK_EPISODE_SLUG,
   assetFileName,
+  buildEpisodeAssetUrl,
+  episodeAssetFolder,
   extensionFromDataUrl,
+  generateEpisodeSlug,
   isAssetLibraryPath,
   isInlineAsset,
   isSystemPath,
@@ -124,6 +138,38 @@ const backgroundOrder = () =>
   store()
     .backgrounds.map((item) => item.id)
     .join(",")
+
+// --- Чистый старт: приложение обязано начинаться с пустого выпуска ---
+// Демо-данных в стартовом наборе нет: ни сцен, ни персонажей, ни треков.
+check(
+  "чистый старт: выпуск пуст (сцены, персонажи, треки, звуки, токены)",
+  store().backgrounds.length === 0 &&
+    store().characters.length === 0 &&
+    store().tracks.length === 0 &&
+    store().soundpad.length === 0 &&
+    store().mapTokens.length === 0 &&
+    Object.keys(store().groupNotes).length === 0 &&
+    store().activeBackgroundId === null &&
+    store().activeCharacterId === null &&
+    store().activeMapId === null,
+  `сцен: ${store().backgrounds.length}, персонажей: ${store().characters.length}, треков: ${store().tracks.length}`
+)
+check(
+  "чистый старт: есть один разделитель сцен, чтобы добавлять было куда",
+  store().sceneGroups.length === 1 && store().sceneGroups[0] === actGroups[0],
+  store().sceneGroups.join(", ")
+)
+
+/**
+ * Возврат к рабочему набору: стор сбрасывается в пустой выпуск (как «Создать
+ * новый выпуск»), а затем накатываются данные смоука. Дальше идут проверки,
+ * которым нужны сцены, персонажи, карты и плейлист.
+ */
+function resetSmokeEpisode() {
+  useEpisodeStore.getState().resetEpisode()
+  useEpisodeStore.getState().importEpisode(SMOKE_EPISODE)
+}
+resetSmokeEpisode()
 
 const seedBackgrounds = store().backgrounds.length
 const seedTracks = store().tracks.length
@@ -497,7 +543,7 @@ stopWatchingStatus()
 stopScreen()
 
 // --- Новая сессия ---
-store().resetEpisode()
+resetSmokeEpisode()
 check(
   "resetEpisode возвращает seed-состояние",
   store().backgrounds.length === seedBackgrounds &&
@@ -584,7 +630,7 @@ check(
 )
 
 // --- Экспорт/импорт выпуска ---
-store().resetEpisode()
+resetSmokeEpisode()
 const exportedEpisode = JSON.stringify(buildEpisodeFile())
 store().renameBackground("bg-harbor", "Экспорт-тест")
 store().importEpisode(parseEpisodeFile(exportedEpisode))
@@ -615,7 +661,7 @@ check("файл без массива фонов отклоняется", reject
 raw.close()
 
 // --- Фаза 6: раскладки по картам, картинка сцены, fade-переход ---
-store().resetEpisode()
+resetSmokeEpisode()
 check(
   "стартовые токены привязаны к картам",
   store().mapTokens.every((token) => token.mapId.length > 0) &&
@@ -695,7 +741,7 @@ check(
 )
 
 // --- Фаза 7: название выпуска и акт «Финал» ---
-store().resetEpisode()
+resetSmokeEpisode()
 check(
   "название выпуска по умолчанию — из кампании",
   store().episodeTitle.length > 0,
@@ -729,7 +775,7 @@ check(
   store().backgrounds.some((item) => item.actGroup === "Финал")
 )
 
-store().resetEpisode()
+resetSmokeEpisode()
 check(
   "новый выпуск возвращает название кампании",
   store().episodeTitle !== "Финал сезона: Три Ключа",
@@ -737,7 +783,7 @@ check(
 )
 
 // --- Фаза 10: треки (добавление/правка/удаление) и удаление сессии ---
-store().resetEpisode()
+resetSmokeEpisode()
 const trackCount = store().tracks.length
 const createdTrackId = store().addTrack({
   title: "Тест трека",
@@ -910,7 +956,7 @@ check(
     tokenCategoryAtPoint(10, 10) === null
 )
 
-store().resetEpisode()
+resetSmokeEpisode()
 const firstCharacterId = store().characters[0].id
 const newTokenId = store().addToken(firstCharacterId, 2, 3)
 check(
@@ -1028,7 +1074,7 @@ check(
   `экранов: ${store().syncScreens}`
 )
 
-store().resetEpisode()
+resetSmokeEpisode()
 store().addDie(20)
 store().addDie(6)
 store().triggerDiceRoll(buildDiceNotation(store().dicePool))
@@ -1253,7 +1299,7 @@ check(
   coverTags.title === "Порт в тумане" && coverTags.artist === "Lowlands Ensemble"
 )
 
-store().resetEpisode()
+resetSmokeEpisode()
 const coverTrackId = store().addTrack({
   title: "С обложкой",
   artist: "QA",
@@ -1419,7 +1465,7 @@ check(
 )
 
 // Главный регресс: раньше после затухания плашки кнопка залипала в «Кубики летят…».
-store().resetEpisode()
+resetSmokeEpisode()
 store().addDie(20)
 store().triggerDiceRoll(buildDiceNotation(store().dicePool))
 check("бросок поднимает флаг ожидания", store().isRollPending === true)
@@ -1550,7 +1596,7 @@ check(
 )
 
 // --- Фаза 16: сцены (дублирование и удаление) ---
-store().resetEpisode()
+resetSmokeEpisode()
 const sceneCount = store().backgrounds.length
 const duplicateSourceId = store().backgrounds[0].id
 store().duplicateBackground(duplicateSourceId)
@@ -1563,7 +1609,7 @@ check(
   store().backgrounds[1].title
 )
 
-store().resetEpisode()
+resetSmokeEpisode()
 const mapToRemove =
   store().backgrounds.find((item) => item.isBattlemap)?.id ?? ""
 const tokensOnMap = store().mapTokens.filter(
@@ -1584,11 +1630,15 @@ check(
   `было токенов: ${tokensOnMap}`
 )
 
-const noteSceneId = Object.keys(store().sceneNotes)[0]
-store().removeBackground(noteSceneId)
+// Заметки принадлежат группе сцен (акту): удаление сцены их не трогает —
+// заметка описывает весь акт, а не отдельную сцену.
+const noteGroup = store().sceneGroups[0]
+store().updateGroupNote(noteGroup, "Заметка всего акта")
+store().removeBackground(store().backgrounds[0].id)
 check(
-  "заметка удалённой сцены тоже удаляется",
-  store().sceneNotes[noteSceneId] === undefined
+  "заметка акта переживает удаление сцены",
+  store().groupNotes[noteGroup] === "Заметка всего акта",
+  store().groupNotes[noteGroup]
 )
 
 // Последнюю сцену выпуска удалить нельзя — на проекторе должно что-то остаться.
@@ -1601,10 +1651,10 @@ check(
   "последняя сцена не удаляется",
   store().backgrounds.length === 1 && store().backgrounds[0].id === lastSceneId
 )
-store().resetEpisode()
+resetSmokeEpisode()
 
 // --- Фаза 17: разделители сцен, пакетный импорт и имя файла выпуска ---
-store().resetEpisode()
+resetSmokeEpisode()
 const seedGroupOrder = "Завязка/1 акт/2 акт/3 акт/Финал"
 check(
   "стартовые разделители совпадают с актами выпуска",
@@ -1670,7 +1720,7 @@ check(
 )
 
 // Перестановка разделителя тащит за собой его сцены.
-store().resetEpisode()
+resetSmokeEpisode()
 store().moveSceneGroup("Завязка", "2 акт")
 check(
   "разделитель переставляется в списке",
@@ -1685,7 +1735,7 @@ check(
 )
 
 // Удаление разделителя: сцены уходят в предыдущий, у первого — в следующий.
-store().resetEpisode()
+resetSmokeEpisode()
 store().removeSceneGroup("1 акт")
 check(
   "удаление разделителя отдаёт сцены предыдущему",
@@ -1701,7 +1751,7 @@ check(
   backgroundOrder()
 )
 
-store().resetEpisode()
+resetSmokeEpisode()
 store().removeSceneGroup("Завязка")
 check(
   "первый разделитель отдаёт сцены следующему",
@@ -1710,7 +1760,7 @@ check(
   store().sceneGroups.join("/")
 )
 
-store().resetEpisode()
+resetSmokeEpisode()
 while (store().sceneGroups.length > 1) {
   store().removeSceneGroup(store().sceneGroups[0])
 }
@@ -1723,7 +1773,7 @@ check(
 )
 
 // Разделители переживают экспорт и импорт выпуска.
-store().resetEpisode()
+resetSmokeEpisode()
 const savedCustomGroup = store().addSceneGroup()
 store().renameSceneGroup(savedCustomGroup, "Эпилог")
 store().moveBackgroundToGroup("bg-harbor", "Эпилог")
@@ -1782,24 +1832,23 @@ check(
 
 // Имя файла выпуска берётся из названия, а не из даты.
 check(
-  "имя файла выпуска берётся из названия",
-  episodeFileName("Порт в тумане") === "pedinburg-Порт в тумане.json",
-  episodeFileName("Порт в тумане")
+  "имя файла выпуска — это slug папки ассетов",
+  episodeFileName("port-v-tumane") === "port-v-tumane.json" &&
+    episodeFileName(generateEpisodeSlug("Порт в тумане")) ===
+      "port-v-tumane.json",
+  episodeFileName("port-v-tumane")
 )
 check(
-  "запрещённые в имени файла символы заменяются",
-  episodeFileName('Порт: "туман" / ночь?') === "pedinburg-Порт туман ночь.json",
+  "опасное название всё равно даёт безопасное имя файла",
+  episodeFileName('Порт: "туман" / ночь?') === "port-tuman-noch.json" &&
+    episodeFileName("Порт... ") === "port.json",
   episodeFileName('Порт: "туман" / ночь?')
 )
 check(
-  "точки и пробелы в конце названия отбрасываются",
-  episodeFileName("Порт... ") === "pedinburg-Порт.json",
-  episodeFileName("Порт... ")
-)
-check(
-  "пустое название даёт запасное имя по дате",
-  /^pedinburg-episode-\d{4}-\d{2}-\d{2}\.json$/.test(episodeFileName("   ")),
-  episodeFileName("   ")
+  "пустой slug заменяется запасным",
+  episodeFileName("") === `${FALLBACK_EPISODE_SLUG}.json` &&
+    episodeFileName("   ") === `${FALLBACK_EPISODE_SLUG}.json`,
+  episodeFileName("")
 )
 
 // --- Фаза 18: связка через sync-сервер (WebSocket) ---
@@ -1931,7 +1980,7 @@ check(
   JSON.stringify(finalHealth.clients)
 )
 for (const peer of [raw, screenPeer, latePeer, cachePeer, refillPeer]) peer.close()
-store().resetEpisode()
+resetSmokeEpisode()
 
 // --- Фаза 19: итог броска на /screen (полоса градиента и кегль строки в rem) ---
 // Прежний кегль 3.5vw на эталонном канвасе OBS 1920 — это 67.2 px, значит итог
@@ -2083,6 +2132,42 @@ check(
     !isAssetLibraryPath(null)
 )
 
+// --- Фаза 22: предметы (категория `item`) живут в своей папке `items/`:
+// в постоянном выпуске — `/assets/episodes/<выпуск>/items/...`, в кэше —
+// `/assets/cache/items/...`. Так их видно в структуре рядом с прочими медиа. ---
+check(
+  "папка предметов items/ есть в списке медиатеки",
+  ASSET_MEDIA_FOLDERS.includes("items") &&
+    ASSET_FOLDERS.items === "items"
+)
+check(
+  "пути предметов в обеих зонах остаются как есть",
+  toAssetUrl("/assets/episodes/ep-01/items/sword.png") ===
+    "/assets/episodes/ep-01/items/sword.png" &&
+    toAssetUrl("/assets/cache/items/sword.png") ===
+      "/assets/cache/items/sword.png" &&
+    toAssetUrl("D:\\Выпуски\\assets\\cache\\items\\меч-й.png") ===
+      "/assets/cache/items/меч-й.png" &&
+    toAssetUrl(`/assets/episodes/ep-01/items/меч-${NFD_AND}.png`) ===
+      `/assets/episodes/ep-01/items/меч-${NFC_AND}.png`,
+  toAssetUrl("/assets/episodes/ep-01/items/sword.png")
+)
+check(
+  "путь предмета без корня попадает в кэш",
+  toAssetUrl("items/sword.png") === "/assets/cache/items/sword.png" &&
+    toAssetUrl("./items/меч.png") === "/assets/cache/items/меч.png" &&
+    isAssetLibraryPath("/assets/cache/items/sword.png") &&
+    isAssetLibraryPath("items/sword.png") &&
+    !isAssetLibraryPath("item/sword.png")
+)
+check(
+  "картинки персонажа раскладываются по категории",
+  characterAssetFolder("item") === "items" &&
+    characterAssetFolder("hero") === "characters" &&
+    characterAssetFolder("npc") === "characters" &&
+    characterAssetFolder("enemy") === "characters"
+)
+
 // Файл выпуска, собранный на другой машине: внутри пути Windows и macOS.
 const foreignFile = parseEpisodeFile(
   JSON.stringify({
@@ -2121,7 +2206,7 @@ const foreignFile = parseEpisodeFile(
     sceneNotes: {},
   })
 )
-store().resetEpisode()
+resetSmokeEpisode()
 store().importEpisode(foreignFile)
 check(
   "при импорте пути ОС становятся /assets/..., а data-URL не трогается",
@@ -2193,7 +2278,7 @@ check("JSON с BOM (сохранён Блокнотом Windows) читаетс�
 // Встроенные ассеты: именно они раньше превращали файл выпуска в 100 МБ Base64.
 const INLINE_IMAGE = `data:image/webp;base64,${"A".repeat(64)}`
 const INLINE_AUDIO = `data:audio/mpeg;base64,${"B".repeat(64)}`
-store().resetEpisode()
+resetSmokeEpisode()
 const heavySceneId = store().addBackground("Интермедия", {
   title: "Сцена с картинкой",
   src: INLINE_IMAGE,
@@ -2322,7 +2407,17 @@ const zonedFile: EpisodeFile = {
       isBattlemap: false,
     },
   ],
-  characters: [],
+  characters: [
+    {
+      id: "item-zone",
+      name: "Меч из выпуска",
+      role: "Предмет",
+      initials: "МВ",
+      category: "item",
+      avatarSrc: "episodes/ep-01/items/меч.png",
+      fullBodyPngSrc: `/assets/cache/items/меч-${NFD_AND}.png`,
+    },
+  ],
   tracks: [
     {
       id: "track-zone",
@@ -2343,9 +2438,13 @@ check(
   zonedResult.issues.length === 0 &&
     zonedResult.file.backgrounds[0].src ===
       "/assets/episodes/ep-01/scenes/порт в тумане.jpg" &&
+    zonedResult.file.characters[0].avatarSrc ===
+      "/assets/episodes/ep-01/items/меч.png" &&
+    zonedResult.file.characters[0].fullBodyPngSrc ===
+      `/assets/cache/items/меч-${NFC_AND}.png` &&
     zonedResult.file.tracks[0].audioSrc ===
       `/assets/cache/music/${NFC_AND}лка.mp3`,
-  zonedResult.file.tracks[0].audioSrc
+  zonedResult.file.characters[0].fullBodyPngSrc
 )
 
 let dirtyRejected = false
@@ -2422,7 +2521,7 @@ check(
 )
 
 // Флаг «≈» приезжает с /screen по сокету: физика не ответила, значения случайные.
-store().resetEpisode()
+resetSmokeEpisode()
 store().triggerDiceRoll(["1d20"])
 store().completeDiceRoll([{ sides: 20, value: 7 }], 7, true)
 const forcedRoll = store().lastRoll
@@ -2438,7 +2537,7 @@ check(
 store().clearRoll()
 
 // --- Саундпад: слоты, экспорт выпуска и глобальный плеер эффектов ---
-store().resetEpisode()
+resetSmokeEpisode()
 check("саундпад стартует пустым (плиток нет)", store().soundpad.length === 0)
 
 const sfxId = store().addSoundpadSlot({
@@ -2627,7 +2726,7 @@ check(
 )
 
 // Настройка зацикливания живёт в сторе и переживает экспорт/импорт выпуска.
-store().resetEpisode()
+resetSmokeEpisode()
 const videoScene = store().addBackground("Завязка", {
   title: "Живой фон",
   src: "/assets/videos/bg-harbor-intro.mp4",
@@ -2658,7 +2757,7 @@ check(
 
 // Пауза, повтор и перемотка — живые команды: их применяют оба окна, а не только
 // плеер Мастера (на /screen они приезжают снапшотом).
-store().resetEpisode()
+resetSmokeEpisode()
 check(
   "видео стартует играющим, зацикленным и с начала",
   store().videoPlayback.isPlaying === true &&
@@ -2714,7 +2813,7 @@ if (otherScene) {
 }
 
 // Пачечное удаление: персонажи уходят с карты и со сцены.
-store().resetEpisode()
+resetSmokeEpisode()
 const doomedCharacters = store()
   .characters.slice(0, 2)
   .map((item) => item.id)
@@ -2746,21 +2845,21 @@ check(
 )
 
 // Пачечное удаление сцен: эфир переезжает на соседнюю, заметки уходят.
-store().resetEpisode()
+resetSmokeEpisode()
 const doomedScenes = store()
   .backgrounds.slice(0, 3)
   .map((item) => item.id)
 const liveSceneBefore = store().activeBackgroundId
-check(
-  "заметка удаляемой сцены была на месте",
-  Boolean(store().sceneNotes[doomedScenes[1]])
-)
+// Заметка акта, из которого удаляем сцены, должна уцелеть: она не про сцену.
+const batchedNoteGroup = store().backgrounds[1].actGroup
+store().updateGroupNote(batchedNoteGroup, "Заметка акта при пачечном удалении")
 store().deleteBatchBackgrounds(doomedScenes)
 check(
-  "deleteBatchBackgrounds: сцены, заметки и эфир согласованы",
+  "deleteBatchBackgrounds: сцены, заметки акта и эфир согласованы",
   !store().backgrounds.some((item) => doomedScenes.includes(item.id)) &&
-    !doomedScenes.some((id) => id in store().sceneNotes) &&
-    !doomedScenes.includes(store().activeBackgroundId) &&
+    store().groupNotes[batchedNoteGroup] ===
+      "Заметка акта при пачечном удалении" &&
+    !doomedScenes.includes(store().activeBackgroundId ?? "") &&
     store().backgrounds.length > 0,
   store().activeBackgroundId === liveSceneBefore
     ? "эфир не трогали"
@@ -2768,7 +2867,7 @@ check(
 )
 
 // Последнюю сцену выпуска пачка не удаляет: на проекторе должно быть что показывать.
-store().resetEpisode()
+resetSmokeEpisode()
 store().deleteBatchBackgrounds(store().backgrounds.map((item) => item.id))
 check(
   "пачка не оставляет выпуск без сцен",
@@ -2776,7 +2875,7 @@ check(
 )
 
 // Треки и саундпад удаляются пачкой целиком.
-store().resetEpisode()
+resetSmokeEpisode()
 const doomedTracks = store().tracks.slice(0, 2).map((item) => item.id)
 store().deleteBatchTracks(doomedTracks)
 check(
@@ -2803,6 +2902,328 @@ check(
 check(
   "видео едет в файл выпуска ссылкой, а не Base64",
   !JSON.stringify(buildEpisodeFile()).includes("data:video")
+)
+
+// --- Фаза 25: slug выпуска — папка ассетов `assets/episodes/<slug>/` ---
+check(
+  "slug выпуска транслитерирует кириллицу",
+  generateEpisodeSlug("Порт в тумане") === "port-v-tumane" &&
+    generateEpisodeSlug("Выпуск №2: Яблоко Раздора") ===
+      "vypusk-2-yabloko-razdora",
+  generateEpisodeSlug("Выпуск №2: Яблоко Раздора")
+)
+check(
+  "slug безопасен для Windows, macOS, ZIP и URL",
+  generateEpisodeSlug('Выпуск: "Лето" / 2026? \\ test') ===
+    "vypusk-leto-2026-test" &&
+    /^[a-z0-9][a-z0-9-]*$/.test(generateEpisodeSlug("Порт в тумане")) &&
+    generateEpisodeSlug("a".repeat(80)).length === 48 &&
+    generateEpisodeSlug("port-v-tumane") === "port-v-tumane",
+  generateEpisodeSlug('Выпуск: "Лето" / 2026? \\ test')
+)
+check(
+  "пустое название даёт запасной slug",
+  generateEpisodeSlug("") === FALLBACK_EPISODE_SLUG &&
+    generateEpisodeSlug("   ") === FALLBACK_EPISODE_SLUG &&
+    generateEpisodeSlug("!!!") === FALLBACK_EPISODE_SLUG
+)
+check(
+  "путь ассета выпуска собирается из slug",
+  episodeAssetFolder("Порт в тумане", ASSET_FOLDERS.scenes) ===
+    "episodes/port-v-tumane/scenes" &&
+    buildEpisodeAssetUrl("port-v-tumane", "music", "theme.mp3") ===
+      "/assets/episodes/port-v-tumane/music/theme.mp3",
+  buildEpisodeAssetUrl("port-v-tumane", "music", "theme.mp3")
+)
+
+// Стор держит slug рядом с названием: переименование пересчитывает папку,
+// сброс выпуска возвращает папку по умолчанию, импорт берёт slug из файла.
+resetSmokeEpisode()
+check(
+  "новый выпуск получает slug по названию кампании",
+  store().episodeSlug === generateEpisodeSlug(campaign.title),
+  store().episodeSlug
+)
+store().renameEpisode("Порт в тумане")
+check(
+  "переименование выпуска переносит папку ассетов",
+  store().episodeTitle === "Порт в тумане" &&
+    store().episodeSlug === "port-v-tumane",
+  store().episodeSlug
+)
+check(
+  "файл выпуска несёт slug, а не Base64",
+  buildEpisodeFile().episodeSlug === "port-v-tumane" &&
+    episodeFileName(buildEpisodeFile().episodeSlug ?? "") ===
+      "port-v-tumane.json"
+)
+store().renameEpisode("Яблоко Раздора")
+check(
+  "slug пересчитывается на каждом шаге правки названия",
+  store().episodeSlug === "yabloko-razdora",
+  store().episodeSlug
+)
+
+// Импорт чужого выпуска: slug из файла — это уже готовая папка на машине
+// Продюсера, поэтому пути `/assets/episodes/<slug>/...` сходятся без пересчёта.
+store().importEpisode(
+  parseEpisodeFile(
+    JSON.stringify({
+      episodeSlug: "ep-2-yabloko",
+      campaign: "Яблоко Раздора",
+      backgrounds: [
+        {
+          id: "bg-slug",
+          title: "Сцена",
+          src: "/assets/episodes/ep-2-yabloko/scenes/forest.jpg",
+          actGroup: "Завязка",
+          isBattlemap: false,
+        },
+      ],
+      characters: [],
+      tracks: [],
+      mapTokens: [],
+      sceneNotes: {},
+    })
+  )
+)
+check(
+  "импорт берёт slug папки из файла выпуска",
+  store().episodeSlug === "ep-2-yabloko" &&
+    store().episodeTitle === "Яблоко Раздора" &&
+    store().backgrounds[0].src ===
+      "/assets/episodes/ep-2-yabloko/scenes/forest.jpg",
+  store().episodeSlug
+)
+store().importEpisode(
+  parseEpisodeFile(
+    JSON.stringify({
+      campaign: "Старый выпуск",
+      backgrounds: [
+        {
+          id: "bg-old",
+          title: "Сцена",
+          src: "/assets/cache/scenes/forest.jpg",
+          actGroup: "Завязка",
+          isBattlemap: false,
+        },
+      ],
+      characters: [],
+      tracks: [],
+      mapTokens: [],
+      sceneNotes: {},
+    })
+  )
+)
+check(
+  "старый файл без slug получает папку из названия, путь кэша не трогается",
+  store().episodeSlug === "staryi-vypusk" &&
+    store().backgrounds[0].src === "/assets/cache/scenes/forest.jpg",
+  store().episodeSlug
+)
+
+// Чистый выпуск: сброс даёт пустое состояние, а экспорт/импорт пустого выпуска
+// не падает — раньше файл без сцен считался ошибкой и импорт прерывался.
+store().resetEpisode()
+check(
+  "resetEpisode даёт пустой выпуск без сцен, треков и эфира",
+  store().backgrounds.length === 0 &&
+    store().characters.length === 0 &&
+    store().tracks.length === 0 &&
+    store().soundpad.length === 0 &&
+    store().mapTokens.length === 0 &&
+    store().activeBackgroundId === null &&
+    store().activeMapId === null &&
+    store().sceneGroups.length === 1
+)
+store().importEpisode(parseEpisodeFile(JSON.stringify(buildEpisodeFile())))
+check(
+  "пустой выпуск переживает экспорт и импорт",
+  store().backgrounds.length === 0 &&
+    store().activeBackgroundId === null &&
+    store().activeMapId === null
+)
+
+// --- Фаза 26: заметки и музыка живут на группах сцен (актах) ---
+resetSmokeEpisode()
+store().updateGroupNote("Завязка", "Акт открытия")
+store().setGroupTrack("1 акт", {
+  id: "grp-track-1",
+  title: "Катакомбы",
+  src: "/assets/episodes/smoke/1-akt/theme.mp3",
+})
+check(
+  "заметка и трек ложатся на группы сцен",
+  store().groupNotes["Завязка"] === "Акт открытия" &&
+    store().groupTracks["1 акт"]?.title === "Катакомбы"
+)
+const groupFile = buildEpisodeFile()
+check(
+  "файл выпуска несёт заметки и треки групп, а заметок сцен в нём нет",
+  groupFile.groupNotes?.["Завязка"] === "Акт открытия" &&
+    groupFile.groupTracks?.["1 акт"]?.src ===
+      "/assets/episodes/smoke/1-akt/theme.mp3" &&
+    !("sceneNotes" in groupFile)
+)
+check(
+  "трек группы попадает в список ассетов выпуска",
+  episodeAssetFields(groupFile).some(
+    (field) => field.field === 'groupTracks["1 акт"].src'
+  )
+)
+
+// Импорт: системный путь трека акта приводится к относительному `/assets/...`.
+store().importEpisode(
+  parseEpisodeFile(
+    JSON.stringify({
+      campaign: "Треки актов",
+      backgrounds: [
+        {
+          id: "bg-grp",
+          title: "Сцена",
+          src: "",
+          actGroup: "1 акт",
+          isBattlemap: false,
+        },
+      ],
+      characters: [],
+      tracks: [],
+      mapTokens: [],
+      groupTracks: {
+        "1 акт": {
+          id: "g",
+          title: "Кроссфейд",
+          src: "D:\\proj\\assets\\music\\theme.mp3",
+        },
+      },
+    })
+  )
+)
+check(
+  "трек группы из файла нормализуется в /assets/...",
+  store().groupTracks["1 акт"]?.src === "/assets/music/theme.mp3",
+  store().groupTracks["1 акт"]?.src ?? "нет трека"
+)
+
+// Переименование акта переносит его материалы, удаление — забирает с собой.
+resetSmokeEpisode()
+store().updateGroupNote("Финал", "Финальная сцена")
+store().setGroupTrack("Финал", {
+  id: "grp-final",
+  title: "Финал",
+  src: "/assets/final.mp3",
+})
+store().renameSceneGroup("Финал", "Эпилог")
+check(
+  "переименование акта переносит заметку и трек",
+  store().groupNotes["Эпилог"] === "Финальная сцена" &&
+    store().groupTracks["Эпилог"]?.title === "Финал" &&
+    store().groupNotes["Финал"] === undefined &&
+    store().groupTracks["Финал"] === undefined,
+  store().groupTracks["Эпилог"]?.title ?? "нет трека"
+)
+store().removeGroupTrack("Эпилог")
+check(
+  "removeGroupTrack убирает музыку акта",
+  store().groupTracks["Эпилог"] === undefined
+)
+
+// Старый файл: заметки лежат по сценам — переносим их на акты сцен.
+store().importEpisode(
+  parseEpisodeFile(
+    JSON.stringify({
+      campaign: "Старый выпуск",
+      backgrounds: [
+        {
+          id: "bg-old-1",
+          title: "Сцена 1",
+          src: "",
+          actGroup: "Завязка",
+          isBattlemap: false,
+        },
+        {
+          id: "bg-old-2",
+          title: "Сцена 2",
+          src: "",
+          actGroup: "2 акт",
+          isBattlemap: false,
+        },
+      ],
+      characters: [],
+      tracks: [],
+      mapTokens: [],
+      sceneNotes: {
+        "bg-old-1": "Заметка первой сцены",
+        "bg-old-2": "Заметка второй сцены",
+      },
+    })
+  )
+)
+check(
+  "заметки старого файла (по сценам) переносятся на акты",
+  store().groupNotes["Завязка"] === "Заметка первой сцены" &&
+    store().groupNotes["2 акт"] === "Заметка второй сцены",
+  JSON.stringify(store().groupNotes)
+)
+
+// --- Фаза 27: музыка актов — решения движка (чистые функции) ---
+// Смена сцены внутри акта: трек тот же — музыку не трогаем и не перезапускаем.
+check(
+  "переключение сцен внутри акта не трогает музыку",
+  resolveGroupTrackAction({
+    requestedId: "act-a",
+    currentId: "act-a",
+    manualPlaying: false,
+    suspended: false,
+  }).type === "keep"
+)
+// Переход в другой акт с треком: включаем новый трек с начала (кроссфейдом).
+const switchGroupAction = resolveGroupTrackAction({
+  requestedId: "act-b",
+  currentId: "act-a",
+  manualPlaying: false,
+  suspended: false,
+})
+check(
+  "другой акт с треком включает его с начала",
+  switchGroupAction.type === "start" && switchGroupAction.restart,
+  JSON.stringify(switchGroupAction)
+)
+// Акт без трека: музыка предыдущего акта продолжает играть.
+check(
+  "акт без трека оставляет музыку играть",
+  resolveGroupTrackAction({
+    requestedId: null,
+    currentId: "act-a",
+    manualPlaying: false,
+    suspended: false,
+  }).type === "keep"
+)
+// Ручной трек из правой панели перекрывает музыку акта и откладывает её.
+check(
+  "ручной трек откладывает музыку акта",
+  resolveGroupTrackAction({
+    requestedId: "act-b",
+    currentId: "act-a",
+    manualPlaying: true,
+    suspended: false,
+  }).type === "defer"
+)
+// Пауза ручного трека: музыка акта возвращается с сохранённой позиции.
+const resumeAction = resolveGroupTrackAction({
+  requestedId: "act-a",
+  currentId: "act-a",
+  manualPlaying: false,
+  suspended: true,
+})
+check(
+  "пауза ручного трека возвращает музыку акта на сохранённую позицию",
+  resumeAction.type === "start" &&
+    !resumeAction.restart &&
+    shouldResumeGroupTrack({ suspended: true, manualPlaying: false }) &&
+    !shouldResumeGroupTrack({ suspended: true, manualPlaying: true }) &&
+    !shouldResumeGroupTrack({ suspended: false, manualPlaying: false }),
+  JSON.stringify(resumeAction)
 )
 
 if (failures.length > 0) {

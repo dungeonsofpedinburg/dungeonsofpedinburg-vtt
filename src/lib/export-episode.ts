@@ -1,6 +1,8 @@
 import {
   assetFileName,
+  episodeAssetFolder,
   extensionFromDataUrl,
+  generateEpisodeSlug,
   isAssetLibraryPath,
   isInlineAsset,
   isSessionUrl,
@@ -8,7 +10,7 @@ import {
   toAssetUrl,
 } from "@/lib/asset-url"
 import { saveAssetToLibrary } from "@/lib/asset-upload"
-import type { EpisodeFile } from "@/data/types"
+import type { EpisodeFile, GroupTracks, TokenCategory } from "@/data/types"
 
 /**
  * Экспорт выпуска: файл `episode.json` везёт ТОЛЬКО текстовые данные — разметку
@@ -26,17 +28,28 @@ import type { EpisodeFile } from "@/data/types"
 export const EPISODE_JSON_LIMIT_BYTES = 500 * 1024
 
 /**
- * Папки ассетов внутри корня `assets/`. Сюда экспорт кладёт выгруженные файлы —
- * уже внутри временного кэша `assets/cache/` (постоянное хранилище `episodes/`
- * наполняют вручную, приложение в него не пишет). В JSON уезжает полный путь
- * `/assets/cache/scenes/forest.jpg`, поэтому код папок остаётся коротким.
+ * Папки ассетов внутри папки выпуска (`assets/episodes/<slug>/`): сцены,
+ * персонажи, предметы, музыка и саундпад. Экспорт выгружает файлы именно сюда,
+ * поэтому папку выпуска можно целиком заархивировать и передать Мастеру — все
+ * картинки и звуки уже внутри, а в JSON лежат относительные пути
+ * `/assets/episodes/<slug>/scenes/forest.jpg`.
  */
 export const ASSET_FOLDERS = {
   scenes: "scenes",
   characters: "characters",
+  items: "items",
   music: "music",
   soundpad: "soundpad",
 } as const
+
+/**
+ * Папка картинок персонажа: предметы (4-я колонка панели токенов, `category:
+ * "item"`) едут в `items/`, все остальные категории — в `characters/`. Папка
+ * выбирается один раз здесь, поэтому и аватар, и фигура предмета лежат рядом.
+ */
+export function characterAssetFolder(category: TokenCategory) {
+  return category === "item" ? ASSET_FOLDERS.items : ASSET_FOLDERS.characters
+}
 
 /** Почему значение ассета не попало в файл выпуска. */
 export type AssetIssueReason = "inline" | "system-path" | "session-url"
@@ -74,6 +87,11 @@ export function episodeAssetFields(file: EpisodeFile) {
     ...(file.soundpad ?? []).map((item, index) => ({
       field: `soundpad[${index}].src`,
       value: item.src,
+    })),
+    // Треки групп — такие же ассеты: файл лежит в папке выпуска или в кэше.
+    ...Object.entries(file.groupTracks ?? {}).map(([group, track]) => ({
+      field: `groupTracks["${group}"].src`,
+      value: track?.src ?? "",
     })),
   ]
 }
@@ -140,7 +158,18 @@ export function sanitizeEpisodeForExport(file: EpisodeFile) {
       src: clean(item.src, `soundpad[${index}].src`),
     })),
   }
-  return { file: result, issues }
+  // Треки групп: путь чистим, пустые записи выбрасываем целиком.
+  const groupTracks: GroupTracks = {}
+  Object.entries(file.groupTracks ?? {}).forEach(([group, track]) => {
+    if (!track) return
+    const src = clean(track.src, `groupTracks["${group}"].src`)
+    if (!src) return
+    groupTracks[group] = { ...track, src }
+  })
+  // Заметки сцен старого формата в файл не пишем: их место заняли заметки групп.
+  const { sceneNotes: _legacyNotes, ...rest } = result
+
+  return { file: { ...rest, groupTracks }, issues }
 }
 
 /**
@@ -200,18 +229,24 @@ export function describeAssetIssues(issues: AssetIssue[]) {
 }
 
 /**
- * Выгружает встроенные ассеты в папку кэша `assets/cache/` и заменяет data-URL на
- * относительный путь `/assets/cache/...`. Из браузера записать файл на диск
- * нельзя, поэтому файлы кладёт локальный сервер Vite/Express — тот же, что
- * раздаёт `assets/` по URL (см. `@/lib/asset-upload`). Относительные значения не
- * трогаем: постоянные выпуски из `assets/episodes/` перезаписи не требуют.
+ * Выгружает встроенные ассеты в папку выпуска `assets/episodes/<slug>/` и
+ * заменяет data-URL на относительный путь `/assets/episodes/<slug>/...`. Из
+ * браузера записать файл на диск нельзя, поэтому файлы кладёт локальный сервер
+ * Vite/Express — тот же, что раздаёт `assets/` по URL (см. `@/lib/asset-upload`).
+ * Относительные значения не трогаем: файлы постоянных выпусков перезаписи не
+ * требуют.
  *
- * Отчёт возвращается отдельно: `saved` — что легло в `assets/cache/`, `issues` —
+ * Папка выпуска — то, что Продюсер передаёт Мастеру: папку архивируют целиком,
+ * поэтому все медиа выпуска оказываются внутри неё, а не в общем кэше.
+ *
+ * Отчёт возвращается отдельно: `saved` — что легло в папку выпуска, `issues` —
  * что пришлось выбросить (тогда в JSON останется пустая строка, но не Base64).
  */
-export async function persistEpisodeAssets(file: EpisodeFile) {
+export async function persistEpisodeAssets(file: EpisodeFile, episodeSlug: string) {
   const saved: string[] = []
   const issues: AssetIssue[] = []
+  /** Папка выпуска для медиапапки: `scenes` → `episodes/<slug>/scenes`. */
+  const inEpisode = (folder: string) => episodeAssetFolder(episodeSlug, folder)
 
   const persist = async (
     field: string,
@@ -238,7 +273,7 @@ export async function persistEpisodeAssets(file: EpisodeFile) {
       ...item,
       src: await persist(
         `backgrounds[${index}].src`,
-        ASSET_FOLDERS.scenes,
+        inEpisode(ASSET_FOLDERS.scenes),
         item.id,
         item.title,
         item.src
@@ -247,23 +282,28 @@ export async function persistEpisodeAssets(file: EpisodeFile) {
   )
 
   const characters = await Promise.all(
-    file.characters.map(async (item, index) => ({
-      ...item,
-      avatarSrc: await persist(
-        `characters[${index}].avatarSrc`,
-        ASSET_FOLDERS.characters,
-        item.id,
-        `${item.name} токен`,
-        item.avatarSrc
-      ),
-      fullBodyPngSrc: await persist(
-        `characters[${index}].fullBodyPngSrc`,
-        ASSET_FOLDERS.characters,
-        item.id,
-        item.name,
-        item.fullBodyPngSrc
-      ),
-    }))
+    file.characters.map(async (item, index) => {
+      // Предметы (`category: "item"`) лежат в своей папке `items/` — рядом с
+      // прочими медиа выпуска, а не среди персонажей.
+      const folder = inEpisode(characterAssetFolder(item.category))
+      return {
+        ...item,
+        avatarSrc: await persist(
+          `characters[${index}].avatarSrc`,
+          folder,
+          item.id,
+          `${item.name} токен`,
+          item.avatarSrc
+        ),
+        fullBodyPngSrc: await persist(
+          `characters[${index}].fullBodyPngSrc`,
+          folder,
+          item.id,
+          item.name,
+          item.fullBodyPngSrc
+        ),
+      }
+    })
   )
 
   const tracks = await Promise.all(
@@ -271,14 +311,14 @@ export async function persistEpisodeAssets(file: EpisodeFile) {
       ...item,
       audioSrc: await persist(
         `tracks[${index}].audioSrc`,
-        ASSET_FOLDERS.music,
+        inEpisode(ASSET_FOLDERS.music),
         item.id,
         item.title,
         item.audioSrc
       ),
       coverSrc: await persist(
         `tracks[${index}].coverSrc`,
-        ASSET_FOLDERS.music,
+        inEpisode(ASSET_FOLDERS.music),
         item.id,
         `${item.title} обложка`,
         item.coverSrc
@@ -291,7 +331,7 @@ export async function persistEpisodeAssets(file: EpisodeFile) {
       ...item,
       src: await persist(
         `soundpad[${index}].src`,
-        ASSET_FOLDERS.soundpad,
+        inEpisode(ASSET_FOLDERS.soundpad),
         item.id,
         item.title,
         item.src
@@ -299,13 +339,36 @@ export async function persistEpisodeAssets(file: EpisodeFile) {
     }))
   )
 
+  /** Треки групп: встроенный файл уезжает в `music/` папки выпуска. */
+  const persistGroupTracks = async (groupTracks: GroupTracks) => {
+    const result: GroupTracks = {}
+    for (const [group, track] of Object.entries(groupTracks)) {
+      if (!track) continue
+      const src = await persist(
+        `groupTracks["${group}"].src`,
+        inEpisode(ASSET_FOLDERS.music),
+        track.id,
+        track.title,
+        track.src
+      )
+      if (src) result[group] = { ...track, src }
+    }
+    return result
+  }
+
   const persisted: EpisodeFile = {
     ...file,
+    // Slug в файле совпадает с папкой, куда легли ассеты: при импорте на другой
+    // машине пути сойдутся без пересчёта.
+    episodeSlug: generateEpisodeSlug(episodeSlug),
     backgrounds,
     characters,
     tracks,
     soundpad: soundpadSlots,
+    groupTracks: await persistGroupTracks(file.groupTracks ?? {}),
   }
+  // Треки групп обычно уже лежат файлами (их кладут при привязке к акту), но
+  // встроенный (data-URL) тоже выгружаем — как и остальные ассеты выпуска.
   return { file: persisted, saved, issues }
 }
 

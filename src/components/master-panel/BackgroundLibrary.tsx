@@ -6,8 +6,10 @@ import {
   GripVertical,
   ImagePlus,
   ListChecks,
+  Music,
   Pencil,
   Plus,
+  RefreshCw,
   ScrollText,
   Trash2,
 } from "lucide-react"
@@ -34,8 +36,15 @@ import {
   ContextMenuTrigger,
 } from "@/components/ui/context-menu"
 import { Separator } from "@/components/ui/separator"
-import { backgroundIcons } from "@/data/seed"
+import { backgroundIcon } from "@/data/seed"
 import { useBatchSelection } from "@/hooks/useBatchSelection"
+import {
+  assetFileName,
+  episodeAssetFolder,
+  extensionFromDataUrl,
+} from "@/lib/asset-url"
+import { prepareAudioFile } from "@/lib/audio-file"
+import { saveAssetToLibrary } from "@/lib/asset-upload"
 import { prepareImageFile } from "@/lib/image-file"
 import { isVideoFile, isVideoSrc } from "@/lib/media"
 import { prepareVideoFile } from "@/lib/video-file"
@@ -52,7 +61,14 @@ export function BackgroundLibrary() {
   const backgrounds = useEpisodeStore((state) => state.backgrounds)
   const sceneGroups = useEpisodeStore((state) => state.sceneGroups)
   const activeBackgroundId = useEpisodeStore((state) => state.activeBackgroundId)
-  const sceneNotes = useEpisodeStore((state) => state.sceneNotes)
+  // Заметки и музыка живут на группах сцен (актах), а не на отдельных сценах.
+  const groupNotes = useEpisodeStore((state) => state.groupNotes)
+  const groupTracks = useEpisodeStore((state) => state.groupTracks)
+  const setGroupTrack = useEpisodeStore((state) => state.setGroupTrack)
+  const removeGroupTrack = useEpisodeStore((state) => state.removeGroupTrack)
+  // Видео грузится на диск сразу, поэтому ему нужен slug: файл ложится в папку
+  // своего выпуска (`assets/episodes/<slug>/videos`), а не в общий кэш.
+  const episodeSlug = useEpisodeStore((state) => state.episodeSlug)
   const setActiveBackground = useEpisodeStore((state) => state.setActiveBackground)
   const toggleBattlemapMode = useEpisodeStore(
     (state) => state.toggleBattlemapMode
@@ -98,6 +114,10 @@ export function BackgroundLibrary() {
   const [isImportingScenes, setIsImportingScenes] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const groupImagesInputRef = useRef<HTMLInputElement>(null)
+  /** Группа, для которой сейчас выбирают трек (кнопка «+» у разделителя). */
+  const [trackTarget, setTrackTarget] = useState<string | null>(null)
+  const [isUploadingTrack, setIsUploadingTrack] = useState(false)
+  const groupTrackInputRef = useRef<HTMLInputElement>(null)
   /** Сцена, созданная кнопкой «+»: её занимает первый файл пакетного импорта. */
   const pendingSceneRef = useRef<{ id: string; group: string } | null>(null)
 
@@ -106,18 +126,74 @@ export function BackgroundLibrary() {
     fileInputRef.current?.click()
   }
 
+  /** Кнопка «+» у разделителя: выбираем аудиофайл для музыки акта. */
+  function pickGroupTrack(groupName: string) {
+    setTrackTarget(groupName)
+    setImageError(null)
+    groupTrackInputRef.current?.click()
+  }
+
+  /**
+   * Привязка трека к акту: файл сразу уезжает в папку выпуска
+   * (`assets/episodes/<slug>/music/`), а в стор ложится путь — как у остальных
+   * ассетов. Дальше движок сам играет его зацикленно на сценах этого акта.
+   */
+  async function handleGroupTrackPicked(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+    event.target.value = ""
+    const group = trackTarget
+    setTrackTarget(null)
+    if (!file || !group) return
+
+    setIsUploadingTrack(true)
+    try {
+      const prepared = await prepareAudioFile(file)
+      const fileName = assetFileName(
+        group,
+        prepared.title,
+        extensionFromDataUrl(prepared.dataUrl)
+      )
+      const upload = await saveAssetToLibrary(
+        episodeAssetFolder(episodeSlug, "music"),
+        fileName,
+        prepared.dataUrl
+      )
+      if (!upload.ok) {
+        setImageError(`Трек не выложился: ${upload.error}`)
+        return
+      }
+      setGroupTrack(group, {
+        id: fileName,
+        title: prepared.title,
+        src: upload.url,
+      })
+      setSceneNotice(
+        `Музыка акта «${group}»: ${prepared.title}${
+          prepared.warning ? ` · ${prepared.warning}` : ""
+        }`
+      )
+    } catch (thrown) {
+      setImageError(
+        thrown instanceof Error ? thrown.message : "Не удалось прочитать файл"
+      )
+    } finally {
+      setIsUploadingTrack(false)
+    }
+  }
+
   /**
    * Готовит выбранный файл к хранению в сторе. Картинка сжимается в data-URL (как
-   * и раньше), а видео сразу ложится файлом в `assets/videos`: data-URL видео в
-   * снапшот для /screen не влезет, а сервер отдаёт его с Range-запросами, то есть
-   * плеер умеет перематывать.
+   * и раньше) и уезжает на диск при экспорте, а видео ложится файлом сразу в
+   * папку выпуска `assets/episodes/<slug>/videos`: data-URL видео в снапшот для
+   * /screen не влезет, а сервер отдаёт его с Range-запросами, то есть плеер умеет
+   * перематывать.
    */
   async function prepareSceneMedia(
     file: File,
     options: { id: string; label: string }
   ) {
     if (isVideoFile(file)) {
-      const prepared = await prepareVideoFile(file, options)
+      const prepared = await prepareVideoFile(file, { ...options, episodeSlug })
       return { src: prepared.src, warning: prepared.warning }
     }
     // Сцена уезжает на проектор 1920×880 — режем до 1920 px, а не до 1024.
@@ -278,6 +354,14 @@ export function BackgroundLibrary() {
           <p className="text-xs text-muted-foreground">{sceneNotice}</p>
         ) : null}
 
+        {/* Пустой выпуск: подсказываем, с чего начать, вместо пустого списка. */}
+        {backgrounds.length === 0 ? (
+          <p className="rounded-lg border border-dashed border-border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+            Выпуск пока пуст: сцен нет. Нажмите «+» в разделе — первая картинка
+            сразу встанет в эфир.
+          </p>
+        ) : null}
+
         {batch.isSelecting ? (
           <BatchSelectionBar
             count={batch.count}
@@ -290,6 +374,7 @@ export function BackgroundLibrary() {
         {groups.map((group) => {
           const isGroupOver = group.title === overGroup
           const isGroupDragging = group.title === dragGroup
+          const groupTrack = groupTracks[group.title] ?? null
 
           return (
           <section key={group.title} className="space-y-2">
@@ -359,6 +444,55 @@ export function BackgroundLibrary() {
 
               <Separator className="flex-1" />
 
+              {/* Музыка акта: «+» привязывает трек, ПКМ — замена и удаление. */}
+              <ContextMenu>
+                <ContextMenuTrigger asChild>
+                  <Button
+                    size="icon-sm"
+                    variant="ghost"
+                    disabled={isUploadingTrack}
+                    aria-label={
+                      groupTrack
+                        ? `Музыка акта «${group.title}»: ${groupTrack.title}`
+                        : `Привязать музыку к акту «${group.title}»`
+                    }
+                    title={
+                      groupTrack
+                        ? `Музыка акта: ${groupTrack.title} (ПКМ — заменить или удалить)`
+                        : "Привязать трек к акту (играет зацикленно)"
+                    }
+                    onClick={() => pickGroupTrack(group.title)}
+                    className={cn(groupTrack && "text-primary")}
+                  >
+                    <Music className="size-3.5" />
+                  </Button>
+                </ContextMenuTrigger>
+                <ContextMenuContent className="w-56">
+                  <ContextMenuLabel className="truncate">
+                    {groupTrack
+                      ? `Акт «${group.title}»: ${groupTrack.title}`
+                      : `Акт «${group.title}» — музыки нет`}
+                  </ContextMenuLabel>
+                  <ContextMenuSeparator />
+                  <ContextMenuItem onSelect={() => pickGroupTrack(group.title)}>
+                    {groupTrack ? <RefreshCw /> : <Plus />}
+                    {groupTrack ? "Заменить трек" : "Привязать трек"}
+                  </ContextMenuItem>
+                  {groupTrack ? (
+                    <>
+                      <ContextMenuSeparator />
+                      <ContextMenuItem
+                        variant="destructive"
+                        onSelect={() => removeGroupTrack(group.title)}
+                      >
+                        <Trash2 />
+                        Удалить трек
+                      </ContextMenuItem>
+                    </>
+                  ) : null}
+                </ContextMenuContent>
+              </ContextMenu>
+
               <Badge
                 variant="ghost"
                 className="text-[10px] transition-opacity group-hover/divider:opacity-0"
@@ -384,9 +518,9 @@ export function BackgroundLibrary() {
 
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 2xl:grid-cols-4">
               {group.items.map((background) => {
-                const Icon = backgroundIcons[background.id]
+                const Icon = backgroundIcon(background.id)
                 const isActive = background.id === activeBackgroundId
-                const hasNote = Boolean(sceneNotes[background.id]?.trim())
+                const hasNote = Boolean(groupNotes[background.actGroup]?.trim())
                 const isDragging = background.id === dragId
                 const isOver = background.id === overId
                 const isSelected = batch.isSelected(background.id)
@@ -615,6 +749,15 @@ export function BackgroundLibrary() {
           accept={SCENE_FILE_ACCEPT}
           className="hidden"
           onChange={handleSceneImagePicked}
+        />
+
+        {/* Музыка акта: выбранный файл сразу уезжает в папку выпуска. */}
+        <input
+          ref={groupTrackInputRef}
+          type="file"
+          accept="audio/*,.mp3,.ogg,.wav,.m4a,.flac"
+          className="hidden"
+          onChange={handleGroupTrackPicked}
         />
 
         {/* Пакетный импорт сцен: несколько картинок или видео сразу в один разделитель. */}

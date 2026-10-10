@@ -30,6 +30,10 @@ const EPISODE_FOLDER = "smoke-выпуск №1"
 const NFC_SCENE = "nfc-й.jpg"
 /** Тот же «й», но в форме NFD: «и» + диакритика — так имя лежит на диске в macOS. */
 const NFD_SCENE = "nfd-\u0438\u0306.jpg"
+/** Папка предметов: категория `item`, 4-я колонка панели токенов. */
+const ITEMS_FOLDER = "items"
+const ITEM_NFC_SCENE = "nfc-предмет-й.png"
+const ITEM_NFD_SCENE = "nfd-предмет-\u0438\u0306.png"
 
 /** Крошечная картинка 1×1 PNG — содержимое проверяем побайтно. */
 const SMOKE_PNG =
@@ -38,6 +42,19 @@ const SMOKE_PNG =
 /** Пути для выгрузки: папку кэша подставляет сервер. */
 const UPLOAD_SCENE = "scenes/smoke-проверка.png"
 const UPLOAD_VIDEO = "videos/smoke-клип.mp4"
+/** Предмет: картинка категории `item` едет в свою папку кэша. */
+const UPLOAD_ITEM = "smoke-предмет.png"
+/** Корень кэша в URL: с него начинаются пути, которые вернул сервер выгрузки. */
+const CACHE_URL = "/assets/cache/"
+/** Корень папок выпусков в URL: путь экспорта любого ассета начинается с него. */
+const EPISODES_URL = "/assets/episodes/"
+/** Выпуск-фикстура сквозного экспорта: папка `assets/episodes/smoke-test/`. */
+const EPISODE_SLUG = "smoke-test"
+const EPISODE_UPLOAD = "test.png"
+/** Выпуск для полного экспорта из стора: название и его slug. */
+const FULL_EXPORT_SLUG = "smoke-export"
+/** Все папки выпусков, которые создаёт смоук: их убираем после прогона. */
+const SMOKE_EPISODE_SLUGS = [EPISODE_SLUG, FULL_EXPORT_SLUG]
 
 /** URL из сегментов пути: кириллица и пробелы уезжают в процентном анкодинге. */
 function assetUrl(segments) {
@@ -75,6 +92,11 @@ export async function runAssetServerSmoke() {
   ensureDir(sceneDir)
   writeFileSync(resolve(sceneDir, NFC_SCENE), "nfc-fixture")
   writeFileSync(resolve(sceneDir, NFD_SCENE), "nfd-fixture")
+  // Предметы: папка `items/` внутри того же выпуска.
+  const itemsDir = resolve(episodeDir, ITEMS_FOLDER)
+  ensureDir(itemsDir)
+  writeFileSync(resolve(itemsDir, ITEM_NFC_SCENE), "items-fixture")
+  writeFileSync(resolve(itemsDir, ITEM_NFD_SCENE), "items-nfd-fixture")
 
   let server = null
   try {
@@ -131,7 +153,34 @@ export async function runAssetServerSmoke() {
       `${rangeResponse.status} · ${rangeResponse.headers.get("content-range")}`
     )
 
-    // 4. Выгрузка из интерфейса: файл ложится в кэш, URL — с префиксом кэша.
+    // 4. Предметы выпуска: `/assets/episodes/<выпуск>/items/<файл>`.
+    const itemUrl = assetUrl(["episodes", EPISODE_FOLDER, ITEMS_FOLDER, ITEM_NFC_SCENE])
+    const itemResponse = await fetch(base + itemUrl)
+    const itemBody = await itemResponse.text()
+    report(
+      "ассеты: предмет из assets/episodes/<выпуск>/items/ отдаётся",
+      itemResponse.status === 200 &&
+        itemBody === "items-fixture" &&
+        itemResponse.headers.get("content-type") === "image/png",
+      `${itemResponse.status} · ${itemUrl}`
+    )
+
+    // 5. Предмет из macOS: файл записан в NFD, браузер просит NFC.
+    const itemNfdRequest = assetUrl([
+      "episodes",
+      EPISODE_FOLDER,
+      ITEMS_FOLDER,
+      ITEM_NFD_SCENE.normalize("NFC"),
+    ])
+    const itemNfdResponse = await fetch(base + itemNfdRequest)
+    const itemNfdBody = await itemNfdResponse.text()
+    report(
+      "ассеты: предмет с NFD-именем открывается по NFC-запросу",
+      itemNfdResponse.status === 200 && itemNfdBody === "items-nfd-fixture",
+      `${itemNfdResponse.status} · ${itemNfdRequest}`
+    )
+
+    // 6. Выгрузка из интерфейса: файл ложится в кэш, URL — с префиксом кэша.
     const upload = await postAsset(base, UPLOAD_SCENE, SMOKE_PNG)
     const uploadedPath = resolve(cacheRoot, UPLOAD_SCENE)
     if (existsSync(uploadedPath)) uploadedFiles.push(uploadedPath)
@@ -145,7 +194,7 @@ export async function runAssetServerSmoke() {
       `${upload.status} · ${upload.body?.url ?? upload.body?.error ?? "нет ответа"}`
     )
 
-    // 5. Выгруженный файл открывается по своему URL с типом из расширения.
+    // 7. Выгруженный файл открывается по своему URL с типом из расширения.
     const uploadedResponse = await fetch(
       base + assetUrl(["cache", ...UPLOAD_SCENE.split("/")])
     )
@@ -156,7 +205,7 @@ export async function runAssetServerSmoke() {
       `${uploadedResponse.status} · /assets/cache/${UPLOAD_SCENE}`
     )
 
-    // 6. Наследие: путь без папки кэша находит файл внутри кэша.
+    // 8. Наследие: путь без папки кэша находит файл внутри кэша.
     const legacyUrl = assetUrl(UPLOAD_SCENE.split("/"))
     const legacyResponse = await fetch(base + legacyUrl)
     report(
@@ -165,7 +214,7 @@ export async function runAssetServerSmoke() {
       `${legacyResponse.status} · ${legacyUrl}`
     )
 
-    // 7. Полный путь в теле запроса не удваивает папку кэша.
+    // 9. Полный путь в теле запроса не удваивает папку кэша.
     const videoUpload = await postAsset(
       base,
       `/assets/cache/${UPLOAD_VIDEO}`,
@@ -181,16 +230,236 @@ export async function runAssetServerSmoke() {
       `${videoUpload.status} · ${videoUpload.body?.url ?? videoUpload.body?.error}`
     )
 
-    // 8. Безопасность: выход за папку кэша и чужое расширение отсекаются.
-    const escapeAttempt = await postAsset(base, "../episodes/взлом.png", SMOKE_PNG)
-    const executableAttempt = await postAsset(base, "scenes/взлом.exe", SMOKE_PNG)
-    const escapedPath = resolve(episodesRoot, "взлом.png")
+    // 10. Предмет: картинка категории `item` ложится в свою папку кэша.
+    const itemUpload = await postAsset(base, `${ITEMS_FOLDER}/${UPLOAD_ITEM}`, SMOKE_PNG)
+    const uploadedItemPath = resolve(cacheRoot, ITEMS_FOLDER, UPLOAD_ITEM)
+    if (existsSync(uploadedItemPath)) uploadedFiles.push(uploadedItemPath)
     report(
-      "ассеты: выход за папку кэша и чужое расширение отсекаются",
+      "ассеты: картинка предмета сохраняется в assets/cache/items/",
+      itemUpload.status === 200 &&
+        itemUpload.body?.url === `${CACHE_URL}${ITEMS_FOLDER}/${UPLOAD_ITEM}` &&
+        existsSync(uploadedItemPath) &&
+        readFileSync(uploadedItemPath).equals(uploadedBytes),
+      `${itemUpload.status} · ${itemUpload.body?.url ?? itemUpload.body?.error ?? "нет ответа"}`
+    )
+
+    const uploadedItemResponse = await fetch(
+      base + assetUrl(["cache", ITEMS_FOLDER, UPLOAD_ITEM])
+    )
+    report(
+      "ассеты: выгруженный предмет открывается по URL /assets/cache/items/...",
+      uploadedItemResponse.status === 200 &&
+        uploadedItemResponse.headers.get("content-type") === "image/png",
+      `${uploadedItemResponse.status} · ${CACHE_URL}${ITEMS_FOLDER}/${UPLOAD_ITEM}`
+    )
+
+    // 11. Прямая выгрузка в папку выпуска: `episodes/<slug>/scenes/<файл>`.
+    const episodeUpload = await postAsset(
+      base,
+      `episodes/${EPISODE_SLUG}/scenes/${EPISODE_UPLOAD}`,
+      SMOKE_PNG
+    )
+    const episodeUploadPath = resolve(
+      episodesRoot,
+      EPISODE_SLUG,
+      "scenes",
+      EPISODE_UPLOAD
+    )
+    report(
+      "ассеты: выгрузка в episodes/<slug>/scenes/ пишет файл в папку выпуска",
+      episodeUpload.status === 200 &&
+        episodeUpload.body?.url ===
+          `${EPISODES_URL}${EPISODE_SLUG}/scenes/${EPISODE_UPLOAD}` &&
+        existsSync(episodeUploadPath) &&
+        readFileSync(episodeUploadPath).equals(uploadedBytes),
+      `${episodeUpload.status} · ${episodeUpload.body?.url ?? episodeUpload.body?.error ?? "нет ответа"}`
+    )
+
+    const servedEpisodeUpload = await fetch(
+      base + assetUrl(["episodes", EPISODE_SLUG, "scenes", EPISODE_UPLOAD])
+    )
+    report(
+      "ассеты: файл из папки выпуска открывается по своему URL",
+      servedEpisodeUpload.status === 200 &&
+        servedEpisodeUpload.headers.get("content-type") === "image/png",
+      `${servedEpisodeUpload.status} · ${EPISODES_URL}${EPISODE_SLUG}/scenes/${EPISODE_UPLOAD}`
+    )
+
+    // 12. Сквозной экспорт: все встроенные ассеты ложатся в папку выпуска,
+    // а в JSON уезжают пути `/assets/episodes/<slug>/<папка>/<файл>`.
+    const exportModule = await server.ssrLoadModule("/src/lib/export-episode.ts")
+    const uploadModule = await server.ssrLoadModule("/src/lib/asset-upload.ts")
+    // В Node относительный адрес эндпоинта не работает — указываем сервер явно.
+    uploadModule.setAssetUploadBaseUrl(base)
+    const episodeExport = await exportModule.persistEpisodeAssets(
+      {
+        campaign: "Смоук-выпуск",
+        backgrounds: [
+          {
+            id: "bg-smoke",
+            title: "Сцена смоука",
+            src: SMOKE_PNG,
+            actGroup: "Завязка",
+            isBattlemap: false,
+          },
+        ],
+        characters: [
+          {
+            id: "hero-smoke",
+            name: "Смоук Герой",
+            role: "Воин",
+            initials: "СГ",
+            category: "hero",
+            avatarSrc: SMOKE_PNG,
+            fullBodyPngSrc: "",
+          },
+          {
+            id: "item-smoke-sword",
+            name: "Клинок смоука",
+            role: "Предмет",
+            initials: "КС",
+            category: "item",
+            avatarSrc: SMOKE_PNG,
+            fullBodyPngSrc: "",
+          },
+        ],
+        tracks: [
+          {
+            id: "track-smoke",
+            title: "Тема смоука",
+            artist: "Автор",
+            duration: "1:00",
+            tag: "Прочее",
+            audioSrc: SMOKE_PNG,
+            coverSrc: "",
+          },
+        ],
+        soundpad: [
+          { id: "sfx-smoke", title: "Взрыв", icon: "Bomb", src: SMOKE_PNG },
+        ],
+        // Трек акта: встроенный файл выгружается в music/ папки выпуска.
+        groupTracks: {
+          Завязка: { id: "grp-smoke", title: "Тема акта", src: SMOKE_PNG },
+        },
+        mapTokens: [],
+        sceneNotes: {},
+      },
+      EPISODE_SLUG
+    )
+    // Пути по папкам выпуска: сцена, персонаж, предмет, музыка, звук, трек акта.
+    const exportedFolders = [
+      episodeExport.file.backgrounds[0].src,
+      episodeExport.file.characters[0].avatarSrc,
+      episodeExport.file.characters[1].avatarSrc,
+      episodeExport.file.tracks[0].audioSrc,
+      episodeExport.file.soundpad[0].src,
+      episodeExport.file.groupTracks?.["Завязка"]?.src ?? "",
+    ]
+    const exportedFiles = exportedFolders.map((url) =>
+      resolve(episodesRoot, url.slice(EPISODES_URL.length))
+    )
+    for (const file of exportedFiles) {
+      if (existsSync(file)) uploadedFiles.push(file)
+    }
+    const servedExport = await fetch(
+      base + exportedFolders[0].split("/").map(encodeURIComponent).join("/")
+    )
+    report(
+      "ассеты: экспорт пишет все ассеты в папку выпуска",
+      episodeExport.issues.length === 0 &&
+        episodeExport.file.episodeSlug === EPISODE_SLUG &&
+        exportedFolders.every((url) =>
+          url.startsWith(`${EPISODES_URL}${EPISODE_SLUG}/`)
+        ) &&
+        exportedFolders[0].startsWith(`${EPISODES_URL}${EPISODE_SLUG}/scenes/`) &&
+        exportedFolders[1].startsWith(
+          `${EPISODES_URL}${EPISODE_SLUG}/characters/`
+        ) &&
+        exportedFolders[2].startsWith(`${EPISODES_URL}${EPISODE_SLUG}/items/`) &&
+        exportedFolders[3].startsWith(`${EPISODES_URL}${EPISODE_SLUG}/music/`) &&
+        exportedFolders[4].startsWith(
+          `${EPISODES_URL}${EPISODE_SLUG}/soundpad/`
+        ) &&
+        exportedFolders[5].startsWith(`${EPISODES_URL}${EPISODE_SLUG}/music/`) &&
+        exportedFiles.every((file) => existsSync(file)) &&
+        servedExport.status === 200,
+      exportedFolders.join(" · ")
+    )
+
+    // 13. Обратная совместимость: старый черновик просит `/assets/cache/...`,
+    // а файл лежит в папке выпуска — сервер находит его запасным поиском.
+    const musicFile = exportedFolders[3].slice(
+      exportedFolders[3].lastIndexOf("/") + 1
+    )
+    const legacyCacheUrl = assetUrl(["cache", "music", musicFile])
+    const legacyCacheResponse = await fetch(base + legacyCacheUrl)
+    report(
+      "ассеты: старый путь /assets/cache/... находит файл в папке выпуска",
+      legacyCacheResponse.status === 200,
+      `${legacyCacheResponse.status} · ${legacyCacheUrl}`
+    )
+
+    // 14. Защита: выход из папки, чужой slug выпуска, чужая папка, чужое расширение.
+    const escapeAttempt = await postAsset(base, "../episodes/взлом.png", SMOKE_PNG)
+    const slugAttempt = await postAsset(
+      base,
+      "episodes/Плохой Slug/scenes/взлом.png",
+      SMOKE_PNG
+    )
+    const executableAttempt = await postAsset(base, "scenes/взлом.exe", SMOKE_PNG)
+    const wrongFolderAttempt = await postAsset(base, "другое/взлом.png", SMOKE_PNG)
+    const escapedPath = resolve(episodesRoot, "взлом.png")
+    const unknownFolderPath = resolve(cacheRoot, "другое", "взлом.png")
+    report(
+      "ассеты: выход за папку, чужой slug, чужая папка и расширение отсекаются",
       escapeAttempt.status === 400 &&
+        slugAttempt.status === 400 &&
         executableAttempt.status === 400 &&
-        !existsSync(escapedPath),
-      `${escapeAttempt.status} / ${executableAttempt.status}`
+        wrongFolderAttempt.status === 400 &&
+        !existsSync(escapedPath) &&
+        !existsSync(unknownFolderPath),
+      [
+        escapeAttempt.status,
+        slugAttempt.status,
+        executableAttempt.status,
+        wrongFolderAttempt.status,
+      ].join(" / ")
+    )
+
+    // 15. Полный экспорт «как из интерфейса»: стор → JSON с путями папки выпуска.
+    // Проверяет всю цепочку: название выпуска → slug → папка → файл → URL.
+    const storeModule = await server.ssrLoadModule("/src/store/useEpisodeStore.ts")
+    const episodeIoModule = await server.ssrLoadModule("/src/lib/episode-io.ts")
+    const store = storeModule.useEpisodeStore.getState()
+    store.renameEpisode(FULL_EXPORT_SLUG)
+    const inlineSceneId = store.addBackground("Завязка", {
+      title: "Инлайн-сцена",
+      src: SMOKE_PNG,
+      activate: false,
+    })
+    const fullReport = await episodeIoModule.exportEpisodeFile()
+    const exportedJson = JSON.parse(fullReport.json)
+    const inlineSrc = exportedJson.backgrounds.find(
+      (item) => item.id === inlineSceneId
+    )?.src
+    if (typeof inlineSrc === "string" && inlineSrc.startsWith(EPISODES_URL)) {
+      uploadedFiles.push(resolve(episodesRoot, inlineSrc.slice(EPISODES_URL.length)))
+    }
+    const servedInline =
+      typeof inlineSrc === "string"
+        ? await fetch(base + inlineSrc.split("/").map(encodeURIComponent).join("/"))
+        : null
+    report(
+      "ассеты: экспорт из стора пишет ассеты в папку своего выпуска",
+      fullReport.episodeSlug === FULL_EXPORT_SLUG &&
+        fullReport.fileName === `${FULL_EXPORT_SLUG}.json` &&
+        exportedJson.episodeSlug === FULL_EXPORT_SLUG &&
+        typeof inlineSrc === "string" &&
+        inlineSrc.startsWith(`${EPISODES_URL}${FULL_EXPORT_SLUG}/scenes/`) &&
+        existsSync(resolve(episodesRoot, inlineSrc.slice(EPISODES_URL.length))) &&
+        !fullReport.json.includes("data:image") &&
+        servedInline?.status === 200,
+      `${fullReport.fileName} · ${inlineSrc}`
     )
   } catch (error) {
     report("ассеты: смоук выполнился", false, error?.message ?? String(error))
@@ -211,6 +480,14 @@ export async function runAssetServerSmoke() {
       rmSync(episodeDir, { recursive: true, force: true })
     } catch {
       // Фикстура выпуска уже убрана.
+    }
+    // Папки выпусков-фикстур с выгруженными ассетами: убираем целиком.
+    for (const slug of SMOKE_EPISODE_SLUGS) {
+      try {
+        rmSync(resolve(episodesRoot, slug), { recursive: true, force: true })
+      } catch {
+        // Папки уже нет — не мешает отчёту.
+      }
     }
     // Убираем только те папки, что создал смоук: кэш пользователя цел.
     for (const dir of createdDirs.reverse()) {

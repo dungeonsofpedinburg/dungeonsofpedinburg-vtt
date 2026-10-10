@@ -1,14 +1,15 @@
 import { create } from "zustand"
-import { GRID_COLUMNS, GRID_ROWS, campaign, initialTracks } from "@/data/content"
+import { GRID_COLUMNS, GRID_ROWS, campaign } from "@/data/content"
 import {
   actGroups,
   initialBackgrounds,
   initialCharacters,
+  initialGroupNotes,
   initialMapTokens,
-  initialSceneNotes,
   initialSoundpad,
+  initialTracks,
 } from "@/data/seed"
-import { normalizeEpisodeAssets } from "@/lib/asset-url"
+import { generateEpisodeSlug, normalizeEpisodeAssets } from "@/lib/asset-url"
 import { initialsFromName } from "@/lib/character"
 import { initialVideoPlayback, nextSeekId, videoPlaybackForScene } from "@/lib/media"
 import {
@@ -30,6 +31,8 @@ import type {
   DiceRollResult,
   DieSides,
   EpisodeFile,
+  GroupTrack,
+  GroupTracks,
   MapToken,
   RollDie,
   SceneNotes,
@@ -95,12 +98,19 @@ export type AddBackgroundOptions = {
 type EpisodeState = {
   /** Название выпуска — правится прямо в хэдере */
   episodeTitle: string
+  /**
+   * Папка выпуска внутри `assets/` (`episodes/<slug>/`): туда ложатся ассеты при
+   * экспорте, тем же именем называются JSON и ZIP. Пересчитывается из названия
+   * (`generateEpisodeSlug`), при импорте берётся из файла.
+   */
+  episodeSlug: string
   backgrounds: Background[]
   /** Разделители сцен (акты): порядок отображения в библиотеке и в заметках. */
   sceneGroups: string[]
   characters: Character[]
   tracks: Track[]
-  activeBackgroundId: string
+  /** Сцена в эфире; `null` — в выпуске ещё нет ни одной сцены */
+  activeBackgroundId: string | null
   previousBackgroundId: string | null
   activeCharacterId: string | null
   stagePhase: StagePhase
@@ -108,7 +118,13 @@ type EpisodeState = {
   stageToCharacterId: string | null
   mapTokens: MapToken[]
   activeMapId: string | null
-  sceneNotes: SceneNotes
+  /**
+   * Заметки мастера по группам сцен (актам): ключ — имя группы («Завязка»,
+   * «1 акт»). Заметок у отдельных сцен нет: акт — единица подготовки выпуска.
+   */
+  groupNotes: SceneNotes
+  /** Треки, привязанные к группам сцен: играют зацикленно по ходу эфира. */
+  groupTracks: GroupTracks
   /**
    * Слоты саундпада — быстрые звуковые эффекты поверх музыки. Живут только в
    * панели Мастера: на /screen звук не транслируется (как и треки).
@@ -164,12 +180,17 @@ type EpisodeState = {
   seekVideo: (time: number) => void
   moveBackground: (sourceId: string, targetId: string) => void
   toggleBattlemapMode: (backgroundId: string) => void
-  updateSceneNote: (backgroundId: string, note: string) => void
   addCharacter: (input: CharacterInput) => string
   renameCharacter: (characterId: string, name: string) => void
   updateCharacterImage: (characterId: string, patch: CharacterImagePatch) => void
   setCharacterCategory: (characterId: string, category: TokenCategory) => void
   removeCharacter: (characterId: string) => void
+  /** Заметка группы сцен (акта): клик по группе слева — правка справа */
+  updateGroupNote: (groupName: string, note: string) => void
+  /** Привязать трек к группе сцен: играет зацикленно, пока идут её сцены */
+  setGroupTrack: (groupName: string, track: GroupTrack) => void
+  /** Убрать трек группы: музыка групп больше не поднимается */
+  removeGroupTrack: (groupName: string) => void
   moveTrack: (sourceId: string, targetId: string) => void
   addTrack: (input: TrackInput) => string
   updateTrack: (trackId: string, patch: Partial<TrackInput>) => void
@@ -358,18 +379,20 @@ const IDLE_STAGE = {
 
 export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
   episodeTitle: campaign.title,
+  episodeSlug: generateEpisodeSlug(campaign.title),
   backgrounds: initialBackgrounds,
   sceneGroups: [...actGroups],
   characters: initialCharacters,
   tracks: initialTracks,
   soundpad: initialSoundpad,
-  activeBackgroundId: initialBackgrounds[0].id,
+  activeBackgroundId: initialBackgrounds[0]?.id ?? null,
   previousBackgroundId: null,
   activeCharacterId: null,
   ...IDLE_STAGE,
   mapTokens: initialMapTokens,
   activeMapId: initialBackgrounds.find((item) => item.isBattlemap)?.id ?? null,
-  sceneNotes: initialSceneNotes,
+  groupNotes: initialGroupNotes,
+  groupTracks: {},
   dicePool: [],
   lastRoll: null,
   lastRollEvent: null,
@@ -397,7 +420,9 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
       }
     }),
 
-  renameEpisode: (title) => set({ episodeTitle: title }),
+  // Название выпуска задаёт и папку ассетов: `<slug>` ведёт экспорт, JSON и ZIP.
+  renameEpisode: (title) =>
+    set({ episodeTitle: title, episodeSlug: generateEpisodeSlug(title) }),
 
   updateBackgroundImage: (backgroundId, src) =>
     set((state) => ({
@@ -465,12 +490,9 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
     const backgrounds = state.backgrounds.filter(
       (item) => item.id !== backgroundId
     )
-    const sceneNotes = { ...state.sceneNotes }
-    delete sceneNotes[backgroundId]
 
     set({
       backgrounds,
-      sceneNotes,
       // Раскладка удалённой карты уходит вместе с ней, иначе останутся висячие токены.
       mapTokens: state.mapTokens.filter((token) => token.mapId !== backgroundId),
       // Если удалили эфирную сцену — в эфир встаёт соседняя по списку.
@@ -586,8 +608,22 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
       const sceneGroups = state.sceneGroups
         .map((group) => (group === name ? trimmed : group))
         .filter((group, index, list) => list.indexOf(group) === index)
+      // Заметка и трек едут вместе с разделителем; при слиянии приоритет у того
+      // имени, куда переехали (оно уже существует) — свой отдаём, только если там пусто.
+      const groupNotes = { ...state.groupNotes }
+      const movedNote = groupNotes[name]
+      delete groupNotes[name]
+      if (movedNote && !groupNotes[trimmed]?.trim()) groupNotes[trimmed] = movedNote
+
+      const groupTracks: GroupTracks = { ...state.groupTracks }
+      const movedTrack = groupTracks[name] ?? null
+      delete groupTracks[name]
+      if (movedTrack && !groupTracks[trimmed]) groupTracks[trimmed] = movedTrack
+
       return {
         sceneGroups,
+        groupNotes,
+        groupTracks,
         backgrounds: orderBackgroundsByGroups(
           state.backgrounds.map((item) =>
             item.actGroup === name ? { ...item, actGroup: trimmed } : item
@@ -610,8 +646,16 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
         .filter((item) => item.actGroup === name)
         .map((item) => ({ ...item, actGroup: fallback }))
       const rest = state.backgrounds.filter((item) => item.actGroup !== name)
+      // Заметка и трек удалённого разделителя уходят вместе с ним: сцены
+      // переезжают в соседний акт, а его собственные материалы остаются.
+      const groupNotes = { ...state.groupNotes }
+      delete groupNotes[name]
+      const groupTracks: GroupTracks = { ...state.groupTracks }
+      delete groupTracks[name]
       return {
         sceneGroups,
+        groupNotes,
+        groupTracks,
         backgrounds: orderBackgroundsByGroups([...rest, ...moved], sceneGroups),
       }
     }),
@@ -669,10 +713,22 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
       }
     }),
 
-  updateSceneNote: (backgroundId, note) =>
+  updateGroupNote: (groupName, note) =>
     set((state) => ({
-      sceneNotes: { ...state.sceneNotes, [backgroundId]: note },
+      groupNotes: { ...state.groupNotes, [groupName]: note },
     })),
+
+  setGroupTrack: (groupName, track) =>
+    set((state) => ({
+      groupTracks: { ...state.groupTracks, [groupName]: track },
+    })),
+
+  removeGroupTrack: (groupName) =>
+    set((state) => {
+      const groupTracks: GroupTracks = { ...state.groupTracks }
+      delete groupTracks[groupName]
+      return { groupTracks }
+    }),
 
   moveTrack: (sourceId, targetId) =>
     set((state) => {
@@ -873,11 +929,6 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
         doomed.delete(keeper.id)
       }
 
-      const sceneNotes = { ...state.sceneNotes }
-      doomed.forEach((id) => {
-        delete sceneNotes[id]
-      })
-
       // Эфирную сцену заменяет соседняя по списку — та же логика, что у одиночного
       // удаления: индекс ищем в исходном порядке.
       const activeIndex = Math.max(
@@ -886,13 +937,16 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
         ),
         0
       )
-      const activeBackgroundId = doomed.has(state.activeBackgroundId)
+      // `activeBackgroundId` может быть null (пустой выпуск): doomed.has(null)
+      // сюда попадать не должен — иначе сравнение типов теряет смысл.
+      const activeIsDoomed =
+        state.activeBackgroundId !== null && doomed.has(state.activeBackgroundId)
+      const activeBackgroundId = activeIsDoomed
         ? survivors[Math.min(activeIndex, survivors.length - 1)].id
         : state.activeBackgroundId
 
       return {
         backgrounds: survivors,
-        sceneNotes,
         mapTokens: state.mapTokens.filter(
           (token) => !doomed.has(token.mapId)
         ),
@@ -1118,18 +1172,20 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
     clearRollTimers()
     set({
       episodeTitle: campaign.title,
+      episodeSlug: generateEpisodeSlug(campaign.title),
       backgrounds: initialBackgrounds,
       sceneGroups: [...actGroups],
       characters: initialCharacters,
       tracks: initialTracks,
       soundpad: initialSoundpad,
-      activeBackgroundId: initialBackgrounds[0].id,
+      activeBackgroundId: initialBackgrounds[0]?.id ?? null,
       previousBackgroundId: null,
       activeCharacterId: null,
       ...IDLE_STAGE,
       mapTokens: initialMapTokens,
       activeMapId: initialBackgrounds.find((item) => item.isBattlemap)?.id ?? null,
-      sceneNotes: initialSceneNotes,
+      groupNotes: initialGroupNotes,
+      groupTracks: {},
       dicePool: [],
       lastRoll: null,
       lastRollEvent: null,
@@ -1147,7 +1203,8 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
     const source = normalizeEpisodeAssets(file)
     set((state) => {
       const backgrounds = source.backgrounds
-      const firstBackgroundId = backgrounds[0].id
+      // Пустой файл (выпуск без сцен) — это нормально: эфирной сцены тогда нет.
+      const firstBackgroundId = backgrounds[0]?.id ?? null
       // Разделители из файла + порядок сцен под них: библиотека не «поедет».
       const sceneGroups = resolveSceneGroups(backgrounds, source.sceneGroups)
       const orderedBackgrounds = orderBackgroundsByGroups(
@@ -1165,11 +1222,18 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
               (item) => item.id === id && item.isBattlemap
             )
         )
+      const episodeTitle = source.campaign?.trim()
+        ? source.campaign
+        : state.episodeTitle
 
       return {
-        episodeTitle: source.campaign?.trim()
-          ? source.campaign
-          : state.episodeTitle,
+        episodeTitle,
+        // Слаг из файла — это папка выпуска на машине Продюсера: сохраняем его,
+        // иначе пути `/assets/episodes/<slug>/...` разойдутся с папкой. Файлы
+        // старого формата поля не знают — выводим slug из названия выпуска.
+        episodeSlug: generateEpisodeSlug(
+          source.episodeSlug?.trim() || episodeTitle
+        ),
         backgrounds: orderedBackgrounds,
         sceneGroups,
         characters: source.characters,
@@ -1186,7 +1250,9 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
             (character) => character.id === token.characterId
           )
         ),
-        sceneNotes: source.sceneNotes,
+        // Заметки и треки групп: переносятся из файла как есть.
+        groupNotes: source.groupNotes ?? {},
+        groupTracks: source.groupTracks ?? {},
         activeBackgroundId: hasBackground(source.activeBackgroundId)
           ? source.activeBackgroundId
           : firstBackgroundId,

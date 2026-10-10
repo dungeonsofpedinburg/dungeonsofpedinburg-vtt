@@ -83,6 +83,21 @@ export type DieSides = 4 | 6 | 8 | 10 | 12 | 20
 
 export type SceneNotes = Record<string, string>
 
+/**
+ * Трек, привязанный к группе сцен (акту). Играет зацикленно, пока Мастер ведёт
+ * сцены этой группы: переключение внутри группы музыку не трогает, переход в
+ * другую группу с треком идёт кроссфейдом.
+ */
+export type GroupTrack = {
+  id: string
+  title: string
+  /** Путь к файлу: `/assets/episodes/<slug>/music/theme.mp3` */
+  src: string
+}
+
+/** Треки групп: ключ — имя группы сцен, значение — трек или `null`. */
+export type GroupTracks = Record<string, GroupTrack | null>
+
 /** Фазы двухфазной анимации выхода/выхода персонажа. */
 export type StagePhase = "idle" | "leaving" | "entering"
 
@@ -132,7 +147,8 @@ export type VideoPlaybackState = {
 export type SyncedEpisode = {
   backgrounds: Background[]
   characters: Character[]
-  activeBackgroundId: string
+  /** Сцена в эфире; `null` — выпуск пуст или сцены ещё не выбрана */
+  activeBackgroundId: string | null
   /** Предыдущая сцена — нужна для fade-перехода на /screen */
   previousBackgroundId: string | null
   activeCharacterId: string | null
@@ -154,6 +170,13 @@ export type SyncedEpisode = {
 export type EpisodeFile = {
   exportedAt?: string
   campaign?: string
+  /**
+   * Идентификатор папки выпуска внутри `assets/episodes/` (`port-v-tumane`).
+   * По нему собираются пути ассетов (`/assets/episodes/<slug>/scenes/...`) и имя
+   * JSON-файла, поэтому папка, архив и файл выпуска всегда называются одинаково.
+   * В файлах старого формата поля нет — slug выводят из названия выпуска.
+   */
+  episodeSlug?: string
   backgrounds: Background[]
   /** Разделители сцен в порядке отображения (нет в файлах старого формата). */
   sceneGroups?: string[]
@@ -162,8 +185,17 @@ export type EpisodeFile = {
   /** Слоты саундпада (нет в файлах старого формата — тогда пусто) */
   soundpad?: SoundpadSlot[]
   mapTokens: MapToken[]
-  sceneNotes: SceneNotes
-  activeBackgroundId?: string
+  /** Заметки мастера по группам сцен (актам): ключ — имя группы */
+  groupNotes?: SceneNotes
+  /** Треки, привязанные к группам сцен: ключ — имя группы */
+  groupTracks?: GroupTracks
+  /**
+   * Заметки отдельных сцен — формат до перехода на заметки групп. Читаем при
+   * импорте (переносим в `groupNotes` по акту сцены), но больше не пишем.
+   */
+  sceneNotes?: SceneNotes
+  /** Сцена в эфире; в пустом выпуске поля нет — тогда её просто нет */
+  activeBackgroundId?: string | null
   activeCharacterId?: string | null
   activeMapId?: string | null
 }

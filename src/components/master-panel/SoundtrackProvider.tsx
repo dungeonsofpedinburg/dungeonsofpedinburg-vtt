@@ -21,8 +21,22 @@ function repeatLabelFor(repeatMode: RepeatMode) {
  */
 export function SoundtrackProvider({ children }: { children: ReactNode }) {
   const tracks = useEpisodeStore((state) => state.tracks)
+  const backgrounds = useEpisodeStore((state) => state.backgrounds)
+  const activeBackgroundId = useEpisodeStore(
+    (state) => state.activeBackgroundId
+  )
+  const groupTracks = useEpisodeStore((state) => state.groupTracks)
   const [repeatMode, setRepeatMode] = useState<RepeatMode>("off")
-  const player = useSoundtrackPlayer(tracks, repeatMode)
+
+  /**
+   * Трек активного акта. У акта без привязанного трека значение `null`: движок
+   * такой случай игнорирует, и музыка предыдущего акта продолжает играть.
+   */
+  const activeGroup =
+    backgrounds.find((item) => item.id === activeBackgroundId)?.actGroup ?? ""
+  const groupTrack = activeGroup ? (groupTracks[activeGroup] ?? null) : null
+
+  const player = useSoundtrackPlayer(tracks, repeatMode, groupTrack)
 
   const value: SoundtrackValue = {
     ...player,

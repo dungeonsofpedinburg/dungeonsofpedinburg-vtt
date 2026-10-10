@@ -1,4 +1,4 @@
-import type { DieSides, TokenCategory, Track } from "@/data/types"
+import type { DieSides, TokenCategory } from "@/data/types"
 
 /**
  * Геометрия сетки боя.
@@ -65,11 +65,3 @@ export const campaign = {
 
 export const dice: DieSides[] = [4, 6, 8, 10, 12, 20]
 
-export const initialTracks: Track[] = [
-  { id: "track-01", title: "Порт в тумане", artist: "Lowlands Ensemble", duration: "3:12", tag: "Атмосфера", audioSrc: "", coverSrc: "" },
-  { id: "track-02", title: "Шаги в катакомбах", artist: "Lowlands Ensemble", duration: "4:05", tag: "Подземелье", audioSrc: "", coverSrc: "" },
-  { id: "track-03", title: "Вальс ратуши", artist: "Pedinburg Chamber", duration: "2:48", tag: "Социальная", audioSrc: "", coverSrc: "" },
-  { id: "track-04", title: "Мост Мясников", artist: "Grimworks", duration: "3:37", tag: "Погоня", audioSrc: "", coverSrc: "" },
-  { id: "track-05", title: "Молоты под городом", artist: "Grimworks", duration: "5:21", tag: "Бой", audioSrc: "", coverSrc: "" },
-  { id: "track-06", title: "Костяной хор", artist: "Chapel of Ash", duration: "6:02", tag: "Ритуал", audioSrc: "", coverSrc: "" },
-]

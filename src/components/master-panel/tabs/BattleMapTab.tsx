@@ -9,9 +9,9 @@ import {
 } from "@/components/master-panel/tokenAppearance"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area"
+import { ScrollArea } from "@/components/ui/scroll-area"
 import { gridGeometry, mapGrid } from "@/data/content"
-import { backgroundIcons } from "@/data/seed"
+import { backgroundIcon } from "@/data/seed"
 import {
   resolveCellFromPoint,
   useGridDrop,
@@ -21,6 +21,12 @@ import { useEpisodeStore } from "@/store/useEpisodeStore"
 import { cn } from "@/lib/utils"
 import type { Character } from "@/data/types"
 
+/**
+ * Вкладка «Карты местности». Слева — узкий список карт (как список сцен в
+ * «Описании сцен»), справа — сетка выбранной карты и колонки категорий токенов
+ * под ней. Клик по карте в списке переключает редактируемую карту, эфир при этом
+ * не меняется: на проекторе остаётся та сцена, что стоит в библиотеке.
+ */
 export function BattleMapTab() {
   const backgrounds = useEpisodeStore((state) => state.backgrounds)
   const activeMapId = useEpisodeStore((state) => state.activeMapId)
@@ -32,9 +38,6 @@ export function BattleMapTab() {
   const setActiveMap = useEpisodeStore((state) => state.setActiveMap)
   const setCharacterCategory = useEpisodeStore(
     (state) => state.setCharacterCategory
-  )
-  const toggleBattlemapMode = useEpisodeStore(
-    (state) => state.toggleBattlemapMode
   )
 
   const [activeTokenId, setActiveTokenId] = useState<string | null>(null)
@@ -137,88 +140,82 @@ export function BattleMapTab() {
   }
 
   return (
-    <ScrollArea className="h-full pr-1">
-      <div className="flex flex-col gap-3 pr-3">
-      <div className="flex shrink-0 flex-col gap-2 rounded-lg border border-border bg-muted/20 p-2">
-        <div className="flex items-center justify-between gap-2">
-          <span className="flex items-center gap-1.5 text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
-            <Grid3x3 className="size-3.5" />
-            Карты местности
+    <div className="flex h-full min-h-0 gap-3">
+      {/*
+        Левая колонка — список карт местности. Как и в «Описании сцен», ширина
+        строго 5% ширины окна: квадратные плитки-миниатюры, название в одну
+        строку и счётчик токенов.
+      */}
+      <ScrollArea className="h-full w-[5vw] shrink-0">
+        <div className="flex flex-col gap-1.5 pr-1">
+          <span
+            className="flex items-center justify-between gap-1 text-[10px] font-medium tracking-wide text-muted-foreground uppercase"
+            title="Карты местности"
+          >
+            <Grid3x3 className="size-3 shrink-0" />
+            <Badge variant="ghost" className="px-1 text-[10px]">
+              {battlemaps.length}
+            </Badge>
           </span>
-          <Badge variant="outline">
-            {mapTokens.length} токенов · {mapGrid.columns} × {mapGrid.rows}
-          </Badge>
-        </div>
 
-        {battlemaps.length === 0 ? (
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-xs text-muted-foreground">
-              Карт пока нет — назначьте сцену картой:
-            </span>
-            {backgrounds.slice(0, 4).map((background) => (
-              <Button
-                key={background.id}
-                size="sm"
-                variant="outline"
-                onClick={() => toggleBattlemapMode(background.id)}
-              >
-                <Grid3x3 />
-                {background.title}
-              </Button>
-            ))}
-          </div>
-        ) : (
-          <ScrollArea className="w-full">
-            <div className="flex items-center gap-2 pb-3">
-              {battlemaps.map((background) => {
-                const isActive = background.id === activeMap?.id
-                const Icon = backgroundIcons[background.id]
+          {battlemaps.length === 0 ? (
+            <p
+              className="rounded-lg border border-dashed border-border bg-muted/20 px-1.5 py-2 text-[10px] leading-tight text-muted-foreground"
+              title="Нет карт местности (сделайте фон картой через ПКМ слева)"
+            >
+              Нет карт местности (сделайте фон картой через ПКМ слева)
+            </p>
+          ) : (
+            battlemaps.map((background) => {
+              const isActive = background.id === activeMap?.id
+              const Icon = backgroundIcon(background.id)
+              const tokensHere = allMapTokens.filter(
+                (token) => token.mapId === background.id
+              ).length
 
-                return (
-                  <button
-                    key={background.id}
-                    type="button"
-                    title="Открыть карту для расстановки (эфир не меняется)"
-                    onClick={() => setActiveMap(background.id)}
-                    className={cn(
-                      "flex w-32 shrink-0 flex-col gap-1 rounded-lg border border-border bg-muted/40 p-1 text-left transition-colors hover:bg-muted",
-                      isActive && "border-ring ring-2 ring-ring/40"
+              return (
+                <button
+                  key={background.id}
+                  type="button"
+                  title={`${background.title} · ${tokensHere} на поле`}
+                  onClick={() => setActiveMap(background.id)}
+                  className={cn(
+                    "flex w-full flex-col gap-1 rounded-lg border border-border bg-muted/30 p-1 text-left transition-colors hover:bg-muted",
+                    isActive && "border-primary bg-muted ring-2 ring-primary"
+                  )}
+                >
+                  <span className="relative flex aspect-square w-full items-center justify-center overflow-hidden rounded-md bg-background">
+                    {background.src ? (
+                      <img
+                        src={background.src}
+                        alt={background.title}
+                        draggable={false}
+                        className="absolute inset-0 size-full object-cover"
+                      />
+                    ) : Icon ? (
+                      <Icon className="size-4 text-muted-foreground" />
+                    ) : (
+                      <Grid3x3 className="size-4 text-muted-foreground" />
                     )}
-                  >
-                    <span className="relative flex aspect-[4/3] w-full items-center justify-center overflow-hidden rounded-md bg-background">
-                      {background.src ? (
-                        <img
-                          src={background.src}
-                          alt={background.title}
-                          draggable={false}
-                          className="absolute inset-0 size-full object-cover"
-                        />
-                      ) : Icon ? (
-                        <Icon className="size-5 text-muted-foreground" />
-                      ) : null}
-                      {isActive ? (
-                        <Badge
-                          variant="secondary"
-                          className="absolute top-1 left-1"
-                        >
-                          Открыта
-                        </Badge>
-                      ) : null}
-                    </span>
-                    <span className="truncate px-0.5 text-[11px] font-medium">
-                      {background.title}
-                    </span>
-                  </button>
-                )
-              })}
-            </div>
-            <ScrollBar orientation="horizontal" />
-          </ScrollArea>
-        )}
-      </div>
+                    {tokensHere > 0 ? (
+                      <span className="absolute right-0.5 bottom-0.5 rounded bg-background/85 px-1 text-[9px] tabular-nums text-muted-foreground">
+                        {tokensHere}
+                      </span>
+                    ) : null}
+                  </span>
+                  <span className="block truncate px-0.5 text-[10px] leading-tight font-medium">
+                    {background.title}
+                  </span>
+                </button>
+              )
+            })
+          )}
+        </div>
+      </ScrollArea>
 
+      {/* Правая область: сетка выбранной карты, под ней — колонки категорий. */}
       {activeMap ? (
-        <>
+        <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pl-1">
           <div
             className="relative aspect-[1440/1080] w-full shrink-0 overflow-hidden rounded-lg border border-border bg-muted/30"
             onDragOver={(event) => event.preventDefault()}
@@ -270,7 +267,7 @@ export function BattleMapTab() {
                   className="gap-1 bg-background/80 backdrop-blur-sm"
                 >
                   <Users className="size-3" />
-                  {mapTokens.length} на поле
+                  {mapTokens.length} на поле · {mapGrid.columns} × {mapGrid.rows}
                 </Badge>
                 <Button
                   size="sm"
@@ -312,11 +309,11 @@ export function BattleMapTab() {
               startDrag(payload, event)
             }}
           />
-        </>
+        </div>
       ) : (
-        <div className="rounded-lg border border-dashed border-border bg-muted/20 p-6 text-center text-xs text-muted-foreground">
-          Карт местности нет. Назначьте сцену картой кнопками выше или через ПКМ
-          в библиотеке фонов.
+        <div className="flex min-h-0 flex-1 items-center justify-center rounded-lg border border-dashed border-border bg-muted/20 p-6 text-center text-xs text-muted-foreground">
+          Карт местности пока нет. Правый клик по сцене в библиотеке слева →
+          «Сделать картой местности» — карта появится в списке.
         </div>
       )}
 
@@ -344,7 +341,6 @@ export function BattleMapTab() {
           </span>
         </span>
       ) : null}
-      </div>
-    </ScrollArea>
+    </div>
   )
 }

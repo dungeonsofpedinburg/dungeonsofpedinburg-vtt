@@ -8,20 +8,19 @@ import {
   ExternalLink,
   FolderOpen,
   Grid3x3,
-  Music,
   RotateCcw,
   ScrollText,
   Upload,
 } from "lucide-react"
 import { BackgroundLibrary } from "@/components/master-panel/BackgroundLibrary"
 import { CreateCharacterDialog } from "@/components/master-panel/CharacterDialog"
+import { GlobalAudioSidebar } from "@/components/master-panel/GlobalAudioSidebar"
 import { SceneViewport } from "@/components/master-panel/SceneViewport"
 import { SoundtrackProvider } from "@/components/master-panel/SoundtrackProvider"
 import { TokenPanel } from "@/components/master-panel/TokenPanel"
 import { BattleMapTab } from "@/components/master-panel/tabs/BattleMapTab"
 import { DiceTab } from "@/components/master-panel/tabs/DiceTab"
 import { SceneDescriptionTab } from "@/components/master-panel/tabs/SceneDescriptionTab"
-import { SoundtrackTab } from "@/components/master-panel/tabs/SoundtrackTab"
 import { SyncStatusDot } from "@/components/sync/SyncStatusDot"
 import {
   AlertDialog,
@@ -33,6 +32,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import {
@@ -60,8 +60,8 @@ import {
 import { describeAssetIssues } from "@/lib/export-episode"
 import { useEpisodeStore } from "@/store/useEpisodeStore"
 
-/** Вкладки правой панели: этот же порядок соответствует клавишам 1–4. */
-const TAB_IDS = ["scenes", "sound", "map", "dice"]
+/** Вкладки правой панели: этот же порядок соответствует клавишам 1–3. */
+const TAB_IDS = ["scenes", "map", "dice"]
 
 /** Сколько имён выгруженных файлов показывать в диалоге экспорта. */
 const EXPORT_ASSET_LIST_LIMIT = 5
@@ -74,6 +74,7 @@ export function MasterPanel() {
   const activeBackgroundId = useEpisodeStore((state) => state.activeBackgroundId)
   const activeMapId = useEpisodeStore((state) => state.activeMapId)
   const episodeTitle = useEpisodeStore((state) => state.episodeTitle)
+  const episodeSlug = useEpisodeStore((state) => state.episodeSlug)
   const renameEpisode = useEpisodeStore((state) => state.renameEpisode)
   const resetEpisode = useEpisodeStore((state) => state.resetEpisode)
   const importEpisode = useEpisodeStore((state) => state.importEpisode)
@@ -102,7 +103,7 @@ export function MasterPanel() {
   // Пропорция панелей запоминается в localStorage между перезагрузками.
   const { defaultLayout, onLayoutChanged } = useDefaultLayout({
     id: "pedinburg-master-split",
-    panelIds: ["left", "right"],
+    panelIds: ["left", "center", "audio"],
     onlySaveAfterUserInteractions: true,
   })
 
@@ -133,31 +134,37 @@ export function MasterPanel() {
   }
 
   /**
-   * Экспорт выпуска. Картинки и музыка сначала ложатся файлами в корневую папку
-   * `assets` (их кладёт локальный сервер), поэтому JSON весит килобайты и несёт
-   * только относительные пути `/assets/...`.
+   * Экспорт выпуска. Картинки и музыка ложатся файлами в папку выпуска
+   * `assets/episodes/<slug>/` (их кладёт локальный сервер), поэтому JSON весит
+   * килобайты и несёт только относительные пути. Папку архивируют целиком и
+   * передают Мастеру вместе с этим JSON.
    */
   async function handleExport() {
     try {
       const report = await downloadEpisodeFile()
       const issues =
         report.issues.length > 0
-          ? ` Без ассета остались: ${describeAssetIssues(report.issues)}.`
+          ? `\nБез ассета остались: ${describeAssetIssues(report.issues)}.`
           : ""
-      // Ничего не выгружали и ничего не потеряли — молчим, файл уже скачан.
-      if (report.savedAssets.length === 0 && report.issues.length === 0) return
       // Имён файлов может быть много: в диалоге показываем первые пять.
       const shown = report.savedAssets.slice(0, EXPORT_ASSET_LIST_LIMIT)
       const rest = report.savedAssets.length - shown.length
       const saved =
         report.savedAssets.length > 0
-          ? ` Файлы выложены в папку assets (${report.savedAssets.length}): ` +
-            `${shown.join(", ")}${rest > 0 ? ` и ещё ${rest}` : ""}.` +
-            " Передайте JSON вместе с папкой assets — пути в нём относительные."
+          ? `\nВыгружено файлов: ${report.savedAssets.length} — ${shown.join(", ")}${
+              rest > 0 ? ` и ещё ${rest}` : ""
+            }.`
           : ""
       setFileDialog({
         title: "Выпуск экспортирован",
-        message: `${report.fileName} — ${report.size}.${saved}${issues}`,
+        message:
+          `${report.fileName} — ${report.size}.\n` +
+          `1. Файлы сохранены в папку: assets/episodes/${report.episodeSlug}/\n` +
+          `2. Для передачи Мастеру сожмите эту папку в ${report.episodeSlug}.zip ` +
+          `и отправьте вместе с файлом ${report.fileName}.\n` +
+          `3. Мастер распакует архив в assets/episodes/ на своём компьютере.` +
+          saved +
+          issues,
       })
     } catch (thrown) {
       setFileDialog({
@@ -173,7 +180,7 @@ export function MasterPanel() {
   return (
     <div className="flex min-h-svh flex-col bg-background text-foreground xl:h-svh xl:min-h-0 xl:overflow-hidden">
       <header className="shrink-0 border-b border-border bg-background/95 backdrop-blur">
-        <div className="mx-auto flex max-w-[1800px] items-center gap-2 px-4 py-3">
+        <div className="flex w-full items-center gap-2 px-[1vw] py-3">
           <Input
             value={episodeTitle}
             onChange={(event) => renameEpisode(event.target.value)}
@@ -181,6 +188,15 @@ export function MasterPanel() {
             aria-label="Название выпуска"
             className="h-8 w-72 border-transparent bg-transparent text-sm font-medium shadow-none dark:bg-transparent"
           />
+
+          {/* Куда лягут ассеты выпуска: папку передают Мастеру целиком. */}
+          <Badge
+            variant="outline"
+            className="shrink-0 font-mono"
+            title={`Папка выпуска: assets/episodes/${episodeSlug}/`}
+          >
+            Папка: {episodeSlug}
+          </Badge>
 
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -223,19 +239,19 @@ export function MasterPanel() {
       </header>
 
       <SoundtrackProvider>
-      <main className="mx-auto flex min-h-0 w-full max-w-[1800px] flex-1 p-4">
+      <main className="flex min-h-0 w-full flex-1 px-[1vw] py-4">
         <ResizablePanelGroup
           orientation="horizontal"
           defaultLayout={defaultLayout}
           onLayoutChanged={onLayoutChanged}
           className="min-h-0"
         >
-        {/* Левая панель: закреплён только viewport, токены скроллятся вместе с библиотекой */}
+        {/* Левая панель (35%): закреплён только viewport, токены скроллятся вместе с библиотекой */}
         <ResizablePanel
           id="left"
-          defaultSize="50%"
-          minSize="22%"
-          maxSize="78%"
+          defaultSize="35%"
+          minSize="20%"
+          maxSize="70%"
           className="flex min-h-0 flex-col gap-4"
         >
           <div className="shrink-0">
@@ -262,12 +278,12 @@ export function MasterPanel() {
 
         <ResizableHandle withHandle className="mx-2" />
 
-        {/* Правая панель: у каждой вкладки свой внутренний скролл */}
+        {/* Центральная панель (57%): у каждой вкладки свой внутренний скролл */}
         <ResizablePanel
-          id="right"
-          defaultSize="50%"
-          minSize="22%"
-          maxSize="78%"
+          id="center"
+          defaultSize="57%"
+          minSize="25%"
+          maxSize="90%"
           className="flex min-h-0 flex-col"
         >
           <Card className="flex min-h-0 flex-1 flex-col gap-3 px-(--card-spacing)">
@@ -281,15 +297,11 @@ export function MasterPanel() {
                   <ScrollText />
                   <span className="hidden md:inline">Описание сцен</span>
                 </TabsTrigger>
-                <TabsTrigger value="sound" title="Клавиша 2">
-                  <Music />
-                  <span className="hidden md:inline">Саундтрек</span>
-                </TabsTrigger>
-                <TabsTrigger value="map" title="Клавиша 3">
+                <TabsTrigger value="map" title="Клавиша 2">
                   <Grid3x3 />
                   <span className="hidden md:inline">Карты местности</span>
                 </TabsTrigger>
-                <TabsTrigger value="dice" title="Клавиша 4">
+                <TabsTrigger value="dice" title="Клавиша 3">
                   <Dices />
                   <span className="hidden md:inline">Кубики</span>
                 </TabsTrigger>
@@ -297,9 +309,6 @@ export function MasterPanel() {
 
               <TabsContent value="scenes" className="min-h-0">
                 <SceneDescriptionTab />
-              </TabsContent>
-              <TabsContent value="sound" className="min-h-0">
-                <SoundtrackTab />
               </TabsContent>
               <TabsContent value="map" className="min-h-0">
                 <BattleMapTab />
@@ -309,6 +318,23 @@ export function MasterPanel() {
               </TabsContent>
             </Tabs>
           </Card>
+        </ResizablePanel>
+
+        <ResizableHandle withHandle className="mx-2" />
+
+        {/*
+          Правая панель (8%): глобальная аудио-панель. Она видна при любой
+          вкладке, поэтому музыка и эффекты всегда под рукой. min-w-[85px] держит
+          квадратные плитки читаемыми на узких экранах.
+        */}
+        <ResizablePanel
+          id="audio"
+          defaultSize="8%"
+          minSize="5%"
+          maxSize="20%"
+          className="min-w-[85px]"
+        >
+          <GlobalAudioSidebar />
         </ResizablePanel>
         </ResizablePanelGroup>
       </main>
@@ -360,7 +386,10 @@ export function MasterPanel() {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>{fileDialog?.title}</AlertDialogTitle>
-            <AlertDialogDescription>{fileDialog?.message}</AlertDialogDescription>
+            {/* whitespace-pre-line: памятка по экспорту — нумерованный список. */}
+            <AlertDialogDescription className="whitespace-pre-line">
+              {fileDialog?.message}
+            </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogAction onClick={() => setFileDialog(null)}>

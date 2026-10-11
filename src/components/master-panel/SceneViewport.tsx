@@ -17,10 +17,8 @@ import { cn } from "@/lib/utils"
 export function SceneViewport() {
   const backgrounds = useEpisodeStore((state) => state.backgrounds)
   const activeBackgroundId = useEpisodeStore((state) => state.activeBackgroundId)
-  const activeCharacterId = useEpisodeStore((state) => state.activeCharacterId)
-  const toggleCharacterOnStage = useEpisodeStore(
-    (state) => state.toggleCharacterOnStage
-  )
+  const activeCharacterIds = useEpisodeStore((state) => state.activeCharacterIds)
+  const clearStage = useEpisodeStore((state) => state.clearStage)
   // Пауза, повтор и перемотка живут в сторе: те же команды применяет /screen.
   const videoPlayback = useEpisodeStore((state) => state.videoPlayback)
   const toggleVideoPlaying = useEpisodeStore(
@@ -105,95 +103,94 @@ export function SceneViewport() {
       <div
         role="presentation"
         title={
-          activeCharacterId
-            ? "Клик — убрать персонажа со сцены"
+          activeCharacterIds.length > 0
+            ? "Клик — убрать всех персонажей со сцены"
             : "Так сцену видят игроки"
         }
         onClick={(event) => {
           // Клик по кнопкам и плееру не считаем: это управление видео, а не
-          // «убрать персонажа со сцены».
+          // «убрать персонажей со сцены».
           if (
             (event.target as HTMLElement).closest("button, [data-scene-player]")
           ) {
             return
           }
-          if (activeCharacterId) toggleCharacterOnStage(activeCharacterId)
+          if (activeCharacterIds.length > 0) clearStage()
         }}
         className={cn(
-          "group w-full rounded-lg border border-border bg-muted/40 py-4",
-          activeCharacterId ? "cursor-pointer" : "cursor-default"
+          "group flex w-full flex-col items-center gap-2 rounded-lg border border-border bg-muted/40 py-2",
+          activeCharacterIds.length > 0 ? "cursor-pointer" : "cursor-default"
         )}
       >
-        {/* Сцена по горизонтали центрируется (mx-auto), плеер прижат к её низу */}
-        <div className="relative mx-auto w-fit">
-          <SceneStage
-            className="aspect-[1440/1080] h-[20vh] rounded-md border border-border"
-            interactive
-            videoRef={videoRef}
-          />
-
-          {isVideo && background ? (
-            <div
-              data-scene-player
-              className={cn(
-                "absolute inset-x-2 bottom-2 z-10 flex items-center gap-2 rounded-md border border-border bg-background/90 px-2 py-1 shadow-lg backdrop-blur transition-all duration-300",
-                // Спрятан ниже края сцены и не ловит клики; при наведении на
-                // Viewport (или фокусе внутри) плавно выезжает вверх.
-                "pointer-events-none translate-y-full opacity-0",
-                "group-hover:pointer-events-auto group-hover:translate-y-0 group-hover:opacity-100",
-                "focus-within:pointer-events-auto focus-within:translate-y-0 focus-within:opacity-100"
-              )}
-            >
-              <Button
-                size="icon-sm"
-                variant="ghost"
-                aria-label={isPlaying ? "Пауза видео" : "Воспроизвести видео"}
-                title={
-                  isPlaying
-                    ? "Пауза (остановит видео и на экране OBS)"
-                    : "Воспроизвести (возобновит видео и на экране OBS)"
-                }
-                onClick={toggleVideoPlaying}
-              >
-                {isPlaying ? <Pause /> : <Play />}
-              </Button>
-
-              <Slider
-                className="min-w-24 flex-1"
-                value={[duration > 0 ? (position / duration) * 100 : 0]}
-                // Во время перетаскивания двигаем только превью, а команда
-                // перемотки уходит в стор на отпускании: так /screen не получает
-                // поток снапшотов на каждый пиксель ползунка.
-                onValueChange={(value) => previewSeek(value[0] / 100)}
-                onValueCommit={(value) => commitSeek(value[0] / 100)}
-                max={100}
-                step={0.1}
-                aria-label="Перемотка видео"
-              />
-
-              <span className="w-20 shrink-0 text-right text-[11px] tabular-nums text-muted-foreground">
-                {formatMediaTime(position)} / {formatMediaTime(duration)}
-              </span>
-
-              <Button
-                size="icon-sm"
-                variant="ghost"
-                aria-label={
-                  isLoop ? "Выключить повтор видео" : "Включить повтор видео"
-                }
-                title={
-                  isLoop
-                    ? "Повтор включён — видео идёт по кругу (и на экране OBS)"
-                    : "Повтор выключен — видео остановится в конце (и на экране OBS)"
-                }
-                onClick={() => setVideoLoop(!isLoop)}
-                className={cn(isLoop && "text-amber-400 hover:text-amber-300")}
-              >
-                <Repeat />
-              </Button>
-            </div>
-          ) : null}
+        {/*
+          Сцена: компактный кадр 4:3 — ровно 10% высоты экрана (`h-[10vh]`), ширина
+          считается по пропорции (`w-auto`). Так превью не съедает место у рельса
+          персонажей и библиотеки сцен, а фигуры масштабируются от высоты этого
+          блока: в маленьком Viewport они выглядят так же, как на /screen.
+        */}
+        <div className="relative mx-auto aspect-[4/3] h-[10vh] w-auto max-w-full overflow-hidden rounded-lg bg-black">
+          <SceneStage className="size-full" interactive videoRef={videoRef} />
         </div>
+
+        {/*
+          Плеер видео: узкая полоса ПОД кадром. Внутри 10vh-превью контролы не
+          помещаются (ползунок и таймкод шире самой сцены), а под ним есть вся
+          ширина колонки. Полоса видна только когда в эфире видео-сцена.
+        */}
+        {isVideo && background ? (
+          <div
+            data-scene-player
+            className="flex w-full items-center gap-2 rounded-md border border-border bg-background/90 px-2 py-1"
+          >
+            <Button
+              size="icon-sm"
+              variant="ghost"
+              aria-label={isPlaying ? "Пауза видео" : "Воспроизвести видео"}
+              title={
+                isPlaying
+                  ? "Пауза (остановит видео и на экране OBS)"
+                  : "Воспроизвести (возобновит видео и на экране OBS)"
+              }
+              onClick={toggleVideoPlaying}
+            >
+              {isPlaying ? <Pause /> : <Play />}
+            </Button>
+
+            <Slider
+              className="min-w-0 flex-1"
+              value={[duration > 0 ? (position / duration) * 100 : 0]}
+              // Во время перетаскивания двигаем только превью, а команда
+              // перемотки уходит в стор на отпускании: так /screen не получает
+              // поток снапшотов на каждый пиксель ползунка.
+              onValueChange={(value) => previewSeek(value[0] / 100)}
+              onValueCommit={(value) => commitSeek(value[0] / 100)}
+              max={100}
+              step={0.1}
+              aria-label="Перемотка видео"
+            />
+
+            <span className="shrink-0 text-right text-[11px] tabular-nums text-muted-foreground">
+              {formatMediaTime(position)} / {formatMediaTime(duration)}
+            </span>
+
+            <Button
+              size="icon-sm"
+              variant="ghost"
+              aria-label={
+                isLoop ? "Выключить повтор видео" : "Включить повтор видео"
+              }
+              title={
+                isLoop
+                  ? "Повтор включён — видео идёт по кругу (и на экране OBS)"
+                  : "Повтор выключен — видео остановится в конце (и на экране OBS)"
+              }
+              onClick={() => setVideoLoop(!isLoop)}
+              className={cn(isLoop && "text-amber-400 hover:text-amber-300")}
+            >
+              <Repeat />
+            </Button>
+          </div>
+        ) : null}
       </div>
     </div>
   )

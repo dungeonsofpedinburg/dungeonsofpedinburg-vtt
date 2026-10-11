@@ -20,7 +20,9 @@ import {
 import type {
   ActGroup,
   Background,
+  BackgroundState,
   Character,
+  CharacterState,
   EpisodeFile,
   GroupTracks,
   MapToken,
@@ -53,7 +55,7 @@ export function buildEpisodeSnapshot(): EpisodeFile {
     groupNotes: state.groupNotes,
     groupTracks: state.groupTracks,
     activeBackgroundId: state.activeBackgroundId,
-    activeCharacterId: state.activeCharacterId,
+    activeCharacterIds: state.activeCharacterIds,
     activeMapId: state.activeMapId,
   })
 }
@@ -200,9 +202,22 @@ export function parseEpisodeFile(text: string): EpisodeFile {
     episodeSlug: asOptionalString(parsed.episodeSlug) ?? undefined,
     // Сцены в эфире может не быть: пустой выпуск — это нормальное состояние.
     activeBackgroundId: asOptionalString(parsed.activeBackgroundId),
-    activeCharacterId: asOptionalString(parsed.activeCharacterId),
+    activeCharacterIds: parseActiveCharacterIds(parsed),
     activeMapId: asOptionalString(parsed.activeMapId),
   }
+}
+
+/**
+ * Кто стоял на сцене. Новый формат хранит массив (до четырёх фигур), старый —
+ * одно поле `activeCharacterId`; его читаем как сцену из одного персонажа.
+ */
+function parseActiveCharacterIds(parsed: Record<string, unknown>) {
+  const list = parsed.activeCharacterIds
+  if (Array.isArray(list)) {
+    return list.filter((item): item is string => typeof item === "string")
+  }
+  const single = asOptionalString(parsed.activeCharacterId)
+  return single ? [single] : []
 }
 
 /** Чтение выбранного файла выпуска. */
@@ -273,15 +288,44 @@ function parseBackgrounds(value: unknown): Background[] {
   // Пустой список сцен — тоже выпуск (например только сохранённый шаблон):
   // раньше это считалось ошибкой, но чистый старт начинается именно так.
   const items = value.filter(isRecord).slice(0, 400)
-  return items.map((item, index) => ({
-    id: asString(item.id) || `bg-import-${index}`,
-    title: asString(item.title) || `Сцена ${index + 1}`,
-    src: asString(item.src),
-    actGroup: asActGroup(item.actGroup),
-    isBattlemap: item.isBattlemap === true,
-    // Зацикливание видео-сцены: в файлах старого формата поля нет — значит «да».
-    isLoop: item.isLoop !== false,
-  }))
+  return items.map((item, index) => {
+    const background: Background = {
+      id: asString(item.id) || `bg-import-${index}`,
+      title: asString(item.title) || `Сцена ${index + 1}`,
+      src: asString(item.src),
+      actGroup: asActGroup(item.actGroup),
+      isBattlemap: item.isBattlemap === true,
+      // Зацикливание видео-сцены: в файлах старого формата поля нет — значит «да».
+      isLoop: item.isLoop !== false,
+    }
+    // Состояния сцены: у файлов старого формата их не было — тогда «Обычным»
+    // считается сама сцена (см. `getBackgroundActiveState`).
+    const states = parseBackgroundStates(item.states)
+    if (states.length > 0) background.states = states
+    const activeStateId = asOptionalString(item.activeStateId)
+    if (activeStateId) background.activeStateId = activeStateId
+    return background
+  })
+}
+
+/** Состояния сцены: их кадры — такие же ассеты выпуска, как базовый. */
+function parseBackgroundStates(value: unknown): BackgroundState[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .filter(isRecord)
+    .slice(0, 24)
+    .map((item, index) => {
+      const state: BackgroundState = {
+        id: asString(item.id) || `state-${index}`,
+        name: asString(item.name) || `Состояние ${index + 1}`,
+        src: asString(item.src),
+      }
+      // Флаг карты местности у состояния необязательный: нет — значит как у сцены.
+      if (typeof item.isBattlemap === "boolean") {
+        state.isBattlemap = item.isBattlemap
+      }
+      return state
+    })
 }
 
 function parseCharacters(value: unknown): Character[] {
@@ -302,6 +346,12 @@ function parseCharacters(value: unknown): Character[] {
         avatarSrc: asString(item.avatarSrc),
         fullBodyPngSrc: asString(item.fullBodyPngSrc),
       }
+      // Варианты внешнего вида: у файлов старого формата их не было — тогда
+      // «Обычным» считается сам персонаж (см. `getCharacterActiveState`).
+      const states = parseCharacterStates(item.states)
+      if (states.length > 0) character.states = states
+      const activeStateId = asOptionalString(item.activeStateId)
+      if (activeStateId) character.activeStateId = activeStateId
       if (isRecord(item.hp)) {
         character.hp = {
           current: asNumber(item.hp.current),
@@ -310,6 +360,20 @@ function parseCharacters(value: unknown): Character[] {
       }
       return character
     })
+}
+
+/** Варианты внешнего вида персонажа: их картинки — такие же ассеты выпуска. */
+function parseCharacterStates(value: unknown): CharacterState[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .filter(isRecord)
+    .slice(0, 24)
+    .map((item, index) => ({
+      id: asString(item.id) || `state-${index}`,
+      name: asString(item.name) || `Состояние ${index + 1}`,
+      avatarSrc: asString(item.avatarSrc),
+      fullBodyPngSrc: asString(item.fullBodyPngSrc),
+    }))
 }
 
 function parseTracks(value: unknown): Track[] {

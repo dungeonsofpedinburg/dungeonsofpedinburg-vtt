@@ -201,15 +201,6 @@ export function diceThrowSpeedFactor(
 export const DICE_WIDTH_PERCENT = [22, 19.8, 17.8, 16, 14.4, 13]
 
 /**
- * Перевод «процент ширины подложки → scale движка», откалиброван на /screen:
- * 22% подложки 1248×888 (канвас OBS 1920×1080) → scale 13.42.
- */
-export const SCALE_PER_PERCENT = 0.61
-
-/** Эталон калибровки: прямоугольник подложки на канвасе OBS 1920×1080. */
-export const DICE_REFERENCE_GEOMETRY = { plateWidthPx: 1248, plateHeightPx: 888 }
-
-/**
  * Проекция мира физики на пиксели зависит от ВЫСОТЫ канваса (камера смотрит на
  * арену сверху), поэтому в проценты переводим через высоту подложки: при другом
  * соотношении сторон кубик остаётся того же размера в пикселях, а не «плывёт».
@@ -217,8 +208,40 @@ export const DICE_REFERENCE_GEOMETRY = { plateWidthPx: 1248, plateHeightPx: 888 
  */
 const SCALE_PER_PLATE_HEIGHT = 43.4
 
+/**
+ * Эталон калибровки: прямоугольник подложки кубиков на сцене 1440×1080.
+ * Это сцена минус отступы подложки (по 96 px с каждой стороны: 1440 − 192 =
+ * 1248, 1080 − 192 = 888) — ровно тот же прямоугольник, который DiceOverlay
+ * рисует внутри виртуальной сцены.
+ */
+export const DICE_REFERENCE_GEOMETRY = { plateWidthPx: 1248, plateHeightPx: 888 }
+
+/**
+ * Перевод «процент ширины подложки → scale движка» для ЭТАЛОННОЙ подложки:
+ * `SCALE_PER_PLATE_HEIGHT × W / (100 × H)`. Величина производная — измеренная
+ * калибровка выше, пересчитанная в проценты для эталонного прямоугольника.
+ * Нужна для наглядности и тестов: рабочая формула всегда считает от фактической
+ * геометрии (см. `diceScaleForCount`).
+ */
+export const SCALE_PER_PERCENT =
+  (DICE_REFERENCE_GEOMETRY.plateWidthPx * SCALE_PER_PLATE_HEIGHT) /
+  (100 * DICE_REFERENCE_GEOMETRY.plateHeightPx)
+
 /** Прямоугольник подложки, внутри которой бросаются кубики (px). */
 export type DiceGeometry = { plateWidthPx: number; plateHeightPx: number }
+
+/**
+ * Ширина кубика в пикселях подложки при данном `scale` движка — обратная к
+ * `diceScaleForCount` функция. Чистая: по ней смоук проверяет главный инвариант
+ * калибровки (кубик занимает заданный процент ширины подложки) на любой
+ * геометрии, а не только на эталонной.
+ */
+export function diceWidthPx(
+  scale: number,
+  geometry: DiceGeometry = DICE_REFERENCE_GEOMETRY
+) {
+  return (scale * geometry.plateHeightPx) / SCALE_PER_PLATE_HEIGHT
+}
 
 /**
  * `scale` для пула заданного размера. Пул больше шести кубиков упирается
@@ -259,7 +282,7 @@ export const ROLL_RESULT_TEXT =
 
 /**
  * Кегль итога на /screen: 4× прежних 3.5vw, то есть 4 × 67.2 = 268.8 px на
- * эталонном канвасе OBS 1920×1080 — это ровно 16.8rem при корневом кегле 16 px.
+ * эталонном окне 1920 (корневой кегль 16 px) — это ровно 16.8rem.
  */
 export const SCREEN_ROLL_TEXT_REM = 16.8
 
@@ -273,7 +296,7 @@ export const SCREEN_ROOT_FONT_VW = 120
 export const SCREEN_ROOT_FONT_MIN_PX = 10
 /** Выше 24 px не поднимаем: на 4K-канвасе строка иначе вырастает быстрее подложки. */
 export const SCREEN_ROOT_FONT_MAX_PX = 24
-/** Корневой кегль эталонного канваса 1920×1080 — база всех rem-расчётов. */
+/** Корневой кегль эталонного окна 1920 — база всех rem-расчётов. */
 export const SCREEN_ROOT_FONT_REFERENCE_PX = 16
 
 /** Корневой кегль /screen для окна заданной ширины (та же формула, что в CSS). */

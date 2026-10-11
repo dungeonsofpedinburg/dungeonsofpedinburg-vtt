@@ -59,6 +59,7 @@ import {
 } from "@/lib/episode-io"
 import { describeAssetIssues } from "@/lib/export-episode"
 import { useEpisodeStore } from "@/store/useEpisodeStore"
+import { toast } from "sonner"
 
 /** Вкладки правой панели: этот же порядок соответствует клавишам 1–3. */
 const TAB_IDS = ["scenes", "map", "dice"]
@@ -79,7 +80,7 @@ export function MasterPanel() {
   const resetEpisode = useEpisodeStore((state) => state.resetEpisode)
   const importEpisode = useEpisodeStore((state) => state.importEpisode)
   const addCharacter = useEpisodeStore((state) => state.addCharacter)
-  const activeCharacterId = useEpisodeStore((state) => state.activeCharacterId)
+  const activeCharacterIds = useEpisodeStore((state) => state.activeCharacterIds)
 
   const [isResetOpen, setIsResetOpen] = useState(false)
   const [isCreateOpen, setIsCreateOpen] = useState(false)
@@ -122,14 +123,15 @@ export function MasterPanel() {
     try {
       const text = await readEpisodeFile(file)
       importEpisode(parseEpisodeFile(text))
+      toast.success("Выпуск импортирован", { description: file.name })
     } catch (thrown) {
-      setFileDialog({
-        title: "Не удалось импортировать выпуск",
-        message:
-          thrown instanceof Error
-            ? thrown.message
-            : "Не удалось импортировать выпуск",
-      })
+      const message =
+        thrown instanceof Error
+          ? thrown.message
+          : "Не удалось импортировать выпуск"
+      // Ошибка разбора бывает длинной: её видно и тостом, и в диалоге целиком.
+      toast.error("Не удалось импортировать выпуск", { description: message })
+      setFileDialog({ title: "Не удалось импортировать выпуск", message })
     }
   }
 
@@ -142,10 +144,20 @@ export function MasterPanel() {
   async function handleExport() {
     try {
       const report = await downloadEpisodeFile()
+      // Статус — тостом: он исчезнет сам. Памятку о передаче папки оставляем
+      // диалогом: три шага с именами файлов в тосте читать неудобно.
+      toast.success("Выпуск экспортирован", {
+        description: `${report.fileName} — ${report.size}. Файлы: assets/episodes/${report.episodeSlug}/`,
+      })
       const issues =
         report.issues.length > 0
           ? `\nБез ассета остались: ${describeAssetIssues(report.issues)}.`
           : ""
+      if (report.issues.length > 0) {
+        toast.warning("Часть ассетов не попала в файл", {
+          description: describeAssetIssues(report.issues),
+        })
+      }
       // Имён файлов может быть много: в диалоге показываем первые пять.
       const shown = report.savedAssets.slice(0, EXPORT_ASSET_LIST_LIMIT)
       const rest = report.savedAssets.length - shown.length
@@ -167,13 +179,12 @@ export function MasterPanel() {
           issues,
       })
     } catch (thrown) {
-      setFileDialog({
-        title: "Не удалось экспортировать выпуск",
-        message:
-          thrown instanceof Error
-            ? thrown.message
-            : "Не удалось экспортировать выпуск",
-      })
+      const message =
+        thrown instanceof Error
+          ? thrown.message
+          : "Не удалось экспортировать выпуск"
+      toast.error("Не удалось экспортировать выпуск", { description: message })
+      setFileDialog({ title: "Не удалось экспортировать выпуск", message })
     }
   }
 
@@ -264,7 +275,9 @@ export function MasterPanel() {
               mapId={tokenPanelMapId}
               variant="icons"
               allowCategoryDrag={false}
-              selectedCharacterId={activeCharacterId}
+              // «Выбранным» считаем последнего вышедшего на сцену: остальные
+              // подсвечиваются золотой рамкой прямо в рельсе.
+              selectedCharacterId={activeCharacterIds.at(-1) ?? null}
               onCreate={() => setIsCreateOpen(true)}
             />
           </div>
@@ -325,14 +338,15 @@ export function MasterPanel() {
         {/*
           Правая панель (8%): глобальная аудио-панель. Она видна при любой
           вкладке, поэтому музыка и эффекты всегда под рукой. min-w-[85px] держит
-          квадратные плитки читаемыми на узких экранах.
+          квадратные плитки читаемыми на узких экранах, а min-w-0/overflow-hidden
+          запрещают содержимому растянуть колонку шире своей доли.
         */}
         <ResizablePanel
           id="audio"
           defaultSize="8%"
           minSize="5%"
           maxSize="20%"
-          className="min-w-[85px]"
+          className="min-w-[85px] overflow-hidden"
         >
           <GlobalAudioSidebar />
         </ResizablePanel>

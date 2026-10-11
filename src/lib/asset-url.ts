@@ -328,11 +328,22 @@ export function normalizeEpisodeAssets(file: EpisodeFile): EpisodeFile {
     backgrounds: backgrounds.map((item) => ({
       ...item,
       src: toAssetUrl(item.src),
+      // Картинки состояний сцены — такие же пути выпуска, как базовый кадр.
+      states: (item.states ?? []).map((state) => ({
+        ...state,
+        src: toAssetUrl(state.src),
+      })),
     })),
     characters: characters.map((item) => ({
       ...item,
       avatarSrc: toAssetUrl(item.avatarSrc),
       fullBodyPngSrc: toAssetUrl(item.fullBodyPngSrc),
+      // Картинки вариантов внешнего вида — такие же пути выпуска.
+      states: (item.states ?? []).map((state) => ({
+        ...state,
+        avatarSrc: toAssetUrl(state.avatarSrc),
+        fullBodyPngSrc: toAssetUrl(state.fullBodyPngSrc),
+      })),
     })),
     tracks: tracks.map((item) => ({
       ...item,

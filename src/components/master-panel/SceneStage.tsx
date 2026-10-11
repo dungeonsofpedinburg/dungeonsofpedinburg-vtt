@@ -1,11 +1,16 @@
+import { AnimatePresence, motion } from "framer-motion"
 import { ImageOff, X } from "lucide-react"
-import { useEffect, useRef, type RefObject } from "react"
+import { useEffect, useRef, useState, type RefObject } from "react"
 import { DiceOverlay } from "@/components/dice/DiceOverlay"
 import { BattleMapGrid } from "@/components/master-panel/BattleMapGrid"
+import { CrossfadeImage, CROSSFADE_MS } from "@/components/master-panel/CrossfadeImage"
 import { Button } from "@/components/ui/button"
 import { backgroundIcon } from "@/data/seed"
+import { backgroundStateSrc, isBackgroundBattlemap } from "@/lib/background"
+import { characterFullBodySrc } from "@/lib/character"
 import { ROLL_RESULT_TEXT, formatRollBreakdown } from "@/lib/dice"
 import { isVideoSrc, shouldSeekVideo } from "@/lib/media"
+import { STAGE_RELAYOUT_MS, STAGE_SLIDE_MS, characterStagePosition } from "@/lib/stage"
 import { useEpisodeStore } from "@/store/useEpisodeStore"
 import { cn } from "@/lib/utils"
 import type { Background, Character } from "@/data/types"
@@ -27,10 +32,12 @@ type SceneStageProps = {
 }
 
 /**
- * Сцена: фон или сетка карты → затемнение при персонаже → выезжающий персонаж.
- * Двухфазная смена: старый персонаж уезжает вниз (350 мс), затем новый выезжает снизу.
- * Фазами управляет стор (stagePhase), поэтому рендер остаётся чистым и работает
- * одинаково в панели мастера и на /screen.
+ * Сцена: фон (или сетка карты) → затемнение → до четырёх выезжающих фигур.
+ * Кто стоит на сцене, решает стор (`activeCharacterIds`), а вход и уход играет
+ * этот компонент: список сравнивается с предыдущим кадром, поэтому анимация
+ * работает одинаково в панели Мастера и на /screen (туда список приезжает
+ * снапшотом). Так же проигрываются кроссфейды при смене состояния сцены или
+ * персонажа — кадр не мигает, прежний просто растворяется.
  */
 export function SceneStage({
   className,
@@ -44,55 +51,33 @@ export function SceneStage({
     (state) => state.previousBackgroundId
   )
   const characters = useEpisodeStore((state) => state.characters)
-  const activeCharacterId = useEpisodeStore((state) => state.activeCharacterId)
-  const stagePhase = useEpisodeStore((state) => state.stagePhase)
-  const stageFromCharacterId = useEpisodeStore(
-    (state) => state.stageFromCharacterId
-  )
-  const stageToCharacterId = useEpisodeStore(
-    (state) => state.stageToCharacterId
-  )
+  const activeCharacterIds = useEpisodeStore((state) => state.activeCharacterIds)
   const lastRoll = useEpisodeStore((state) => state.lastRoll)
   const clearRoll = useEpisodeStore((state) => state.clearRoll)
 
   const background = backgrounds.find((item) => item.id === activeBackgroundId)
-  const findCharacter = (id: string | null) =>
-    characters.find((item) => item.id === id) ?? null
 
-  const outgoingCharacter =
-    stagePhase === "idle" ? null : findCharacter(stageFromCharacterId)
-  const incomingCharacter =
-    stagePhase === "leaving"
-      ? null
-      : findCharacter(
-          stagePhase === "entering" ? stageToCharacterId : activeCharacterId
-        )
+  // Кто стоит на сцене: до четырёх фигур, порядок массива задаёт раскладку.
+  const stagedCharacters = activeCharacterIds
+    .map((id) => characters.find((item) => item.id === id) ?? null)
+    .filter((item): item is Character => item !== null)
 
   const previousBackground =
     previousBackgroundId && previousBackgroundId !== activeBackgroundId
       ? (backgrounds.find((item) => item.id === previousBackgroundId) ?? null)
       : null
 
-  const isCharacterVisible =
-    Boolean(outgoingCharacter) || Boolean(incomingCharacter)
+  const isCharacterVisible = stagedCharacters.length > 0
 
   // Слои сцен: уходящая (fade-out) + текущая (fade-in) — тот же приём, что на /screen.
+  // Ключ — только id сцены: состояние меняется внутри слоя, чтобы кроссфейд
+  // картинки проигрывался на месте, а не через пересоздание слоя.
   const backgroundLayers: { background: Background; leaving: boolean }[] = []
   if (previousBackground) {
     backgroundLayers.push({ background: previousBackground, leaving: true })
   }
   if (background) {
     backgroundLayers.push({ background, leaving: false })
-  }
-
-  // Единый список слоёв с ключом по id: узел старого персонажа не пересоздаётся,
-  // поэтому CSS-переход translate-y-0 → translate-y-full реально проигрывается.
-  const layers: { character: Character; leaving: boolean }[] = []
-  if (outgoingCharacter) {
-    layers.push({ character: outgoingCharacter, leaving: true })
-  }
-  if (incomingCharacter) {
-    layers.push({ character: incomingCharacter, leaving: false })
   }
 
   return (
@@ -129,48 +114,75 @@ export function SceneStage({
         )}
       />
 
-      {/* Каждый персонаж — в собственной абсолютной обёртке по центру:
-          так уезжающий и выезжающий слои не выталкивают друг друга по горизонтали.
-          inset-y-0 нужен, чтобы у обёртки была определённая высота и h-[88%] у картинки работал. */}
-      {layers.map(({ character, leaving }) => (
-        <div
-          key={character.id}
-          className="pointer-events-none absolute inset-y-0 left-1/2 flex -translate-x-1/2 items-end justify-center"
-        >
-          {character.fullBodyPngSrc ? (
-            <img
-              src={character.fullBodyPngSrc}
-              alt={character.name}
-              className={cn(
-                "h-[88%] w-auto max-w-none object-contain",
-                leaving
-                  ? "translate-y-full transition-transform duration-[350ms] ease-out"
-                  : stagePhase === "entering"
-                    ? "animate-in slide-in-from-bottom duration-[350ms] ease-out"
-                    : "translate-y-0"
-              )}
-            />
-          ) : (
-            <div
-              className={cn(
-                "flex h-[70%] w-40 flex-col items-center justify-end rounded-t-full border border-border bg-muted/60 pb-6 text-center",
-                leaving
-                  ? "translate-y-full transition-transform duration-[350ms] ease-out"
-                  : stagePhase === "entering"
-                    ? "animate-in slide-in-from-bottom duration-[350ms] ease-out"
-                    : "translate-y-0"
-              )}
+      {/*
+        Фигуры на сцене: каждая на своей позиции в процентах ширины
+        (`characterStagePositions`: 1 → 50%, 2 → 35/65%, 3 → 25/50/75%,
+        4 → 18/38/62/82%). Позиция едет анимацией, поэтому при добавлении или
+        уходе одного героя остальные плавно разъезжаются; вход — выезд снизу,
+        уход — задвигание вниз (AnimatePresence держит фигуру до конца анимации).
+        initial={false}: при открытии /screen никто не выезжает заново.
+
+        Слой занимает весь кадр (`absolute inset-0`), поэтому высота фигуры в
+        процентах считается от высоты СЦЕНЫ, а не от натурального размера
+        картинки: без этого высота не разрешалась и иллюстрация вылезала
+        гигантской (особенно в маленьком Viewport Мастера).
+      */}
+      <AnimatePresence initial={false}>
+        {stagedCharacters.map((character, index) => {
+          const position = characterStagePosition(index, stagedCharacters.length)
+          const fullBodySrc = characterFullBodySrc(character)
+          return (
+            <motion.div
+              key={character.id}
+              className="pointer-events-none absolute inset-0 overflow-hidden"
+              initial={{ y: "100%" }}
+              animate={{ y: "0%" }}
+              exit={{ y: "100%" }}
+              transition={{ duration: STAGE_SLIDE_MS / 1000, ease: "easeOut" }}
             >
-              <span className="text-2xl font-semibold text-muted-foreground">
-                {character.initials}
-              </span>
-              <span className="mt-1 px-3 text-xs text-muted-foreground">
-                {character.name}
-              </span>
-            </div>
-          )}
-        </div>
-      ))}
+              {/*
+                Слот фигуры: квадрат по высоте кадра (80%) — ассеты персонажей
+                обычно квадратные PNG, поэтому сторона слота равна его высоте.
+                Ширину не ограничиваем: фигура стоит на «полу» во весь рост, а
+                на 3–4 героях соседние слоты частично перекрываются (так и нужно).
+                x: -50% центрирует слот на позиции, position — проценты ширины.
+
+                Кадр рисуем «в нативном разрешении»: `image-rendering:
+                high-quality` просит браузер не экономить на масштабировании, а
+                CrossfadeImage снимает анимацию проявления после её конца — пока
+                анимация «залита» (fill-mode: both), кадр живёт на отдельном слое
+                композитинга и на проекторе выглядит мыльным.
+              */}
+              <motion.div
+                className="absolute bottom-0 aspect-square h-[80%] w-auto"
+                initial={false}
+                animate={{ left: `${position}%`, x: "-50%" }}
+                transition={{
+                  duration: STAGE_RELAYOUT_MS / 1000,
+                  ease: "easeInOut",
+                }}
+              >
+                {fullBodySrc ? (
+                  <CrossfadeImage
+                    src={fullBodySrc}
+                    alt={character.name}
+                    className="pointer-events-none size-full object-contain object-bottom [image-rendering:high-quality]"
+                  />
+                ) : (
+                  <div className="flex size-full flex-col items-center justify-end rounded-t-full border border-border bg-muted/60 pb-2 text-center">
+                    <span className="text-xl font-semibold text-muted-foreground">
+                      {character.initials}
+                    </span>
+                    <span className="mt-1 w-full truncate px-2 text-[10px] text-muted-foreground">
+                      {character.name}
+                    </span>
+                  </div>
+                )}
+              </motion.div>
+            </motion.div>
+          )
+        })}
+      </AnimatePresence>
 
       {/* 3D-кубики: слой поверх персонажей, а итог броска — на нижней части подложки */}
       {diceRole === "screen" ? <DiceOverlay /> : null}
@@ -216,7 +228,9 @@ function SceneLayer({
   videoRef?: RefObject<HTMLVideoElement | null>
 }) {
   const Icon = backgroundIcon(background.id)
-  const isVideo = isVideoSrc(background.src)
+  // Эфир рисует активное состояние сцены: «Обычное» — это базовый src сцены.
+  const src = backgroundStateSrc(background)
+  const isVideo = isVideoSrc(src)
   // Пауза, повтор и перемотка видео: одно состояние на оба окна. Мастер меняет
   // его из плеера, /screen получает снапшотом — и оба применяют здесь.
   const { isPlaying, isLoop, seekId, seekTime } = useEpisodeStore(
@@ -229,6 +243,25 @@ function SceneLayer({
   const videoNode = videoRef ?? ownVideoRef
 
   /**
+   * Кроссфейд смены кадра. Подмена `src` у одного и того же <img> мигала бы
+   * чёрным, поэтому прежний кадр (картинка или видео) ещё растворяется поверх
+   * нового: так переключение состояния сцены — «Обычное» → «Ночь» — идёт плавно.
+   */
+  const [staleMedia, setStaleMedia] = useState<{
+    src: string
+    isVideo: boolean
+  } | null>(null)
+  const previousMedia = useRef({ src, isVideo })
+  useEffect(() => {
+    const previous = previousMedia.current
+    previousMedia.current = { src, isVideo }
+    if (!previous.src || previous.src === src) return
+    setStaleMedia(previous)
+    const timer = setTimeout(() => setStaleMedia(null), CROSSFADE_MS)
+    return () => clearTimeout(timer)
+  }, [isVideo, src])
+
+  /**
    * Пауза и возобновление. Уходящий слой (переход между сценами) команд не
    * слушает: это фон затухания, дёргать его из плеера незачем.
    */
@@ -237,14 +270,14 @@ function SceneLayer({
     if (!video || !isVideo || leaving) return
     if (isPlaying) void video.play().catch(() => {})
     else video.pause()
-  }, [isPlaying, isVideo, leaving, background.src, videoNode])
+  }, [isPlaying, isVideo, leaving, src, videoNode])
 
   /** Повтор: держим свойство элемента в согласии со стором. */
   useEffect(() => {
     const video = videoNode.current
     if (!video || leaving) return
     video.loop = isLoop
-  }, [isLoop, leaving, background.src, videoNode])
+  }, [isLoop, leaving, src, videoNode])
 
   /**
    * Перемотка приходит событием: `seekId` — метка команды, `seekTime` — её
@@ -270,13 +303,37 @@ function SceneLayer({
           : "animate-in fade-in duration-500"
       )}
     >
+      {/* Прежний кадр сцены: пока новый проявляется, этот растворяется */}
+      {staleMedia ? (
+        staleMedia.isVideo ? (
+          <video
+            key={`stale-${staleMedia.src}`}
+            src={staleMedia.src}
+            muted
+            playsInline
+            preload="auto"
+            className="pointer-events-none absolute inset-0 size-full animate-out object-cover fade-out fill-mode-forwards"
+            style={{ animationDuration: `${CROSSFADE_MS}ms` }}
+          />
+        ) : (
+          <img
+            key={`stale-${staleMedia.src}`}
+            src={staleMedia.src}
+            alt=""
+            aria-hidden
+            className="pointer-events-none absolute inset-0 size-full animate-out object-cover fade-out fill-mode-forwards"
+            style={{ animationDuration: `${CROSSFADE_MS}ms` }}
+          />
+        )
+      ) : null}
+
       {isVideo ? (
         <video
-          // Ключ по пути: смена сцены пересоздаёт элемент, и автоплей срабатывает
-          // заново — на превью Мастера и на /screen одинаково.
-          key={background.src}
+          // Ключ по пути: смена сцены или состояния пересоздаёт элемент, поэтому
+          // проявление и автоплей играют заново — на превью и на /screen одинаково.
+          key={src}
           ref={videoNode}
-          src={background.src}
+          src={src}
           // Автоплей нужен только для первого кадра: состояние из стора
           // применяется эффектами выше (пауза приедет сразу после монтирования).
           autoPlay
@@ -284,15 +341,21 @@ function SceneLayer({
           // Фон не перебивает саундтрек: звук у видео-сцены всегда выключен.
           muted
           loop={isLoop}
-          className="absolute inset-0 size-full object-cover"
+          className="absolute inset-0 size-full animate-in object-cover fade-in"
+          style={{ animationDuration: `${CROSSFADE_MS}ms` }}
         />
-      ) : background.src ? (
+      ) : src ? (
         <img
-          src={background.src}
+          key={src}
+          src={src}
           alt={background.title}
-          className="absolute inset-0 size-full object-cover"
+          className="absolute inset-0 size-full animate-in object-cover fade-in"
+          style={{ animationDuration: `${CROSSFADE_MS}ms` }}
         />
-      ) : (
+      ) : showHint ? (
+        // Заглушка-подсказка живёт только в панели Мастера. На /screen вместо
+        // серой плашки остаётся монолитно чёрное поле: ObsScreen красит сцену
+        // и страницу в bg-black, поэтому на проекторе нет светлых пятен.
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-muted/40 text-center">
           {Icon ? (
             <Icon className="size-8 text-muted-foreground" />
@@ -302,16 +365,15 @@ function SceneLayer({
           <p className="text-sm font-medium">
             {background.title || "Пустая сцена"}
           </p>
-          {showHint ? (
-            <p className="max-w-xs text-xs text-muted-foreground">
-              Двойной клик по миниатюре в библиотеке — добавить картинку сцены
-            </p>
-          ) : null}
+          <p className="max-w-xs text-xs text-muted-foreground">
+            Двойной клик по миниатюре в библиотеке — добавить картинку сцены
+          </p>
         </div>
-      )}
+      ) : null}
 
-      {/* Карта местности: сетка рисуется ПОВЕРХ картинки, а не вместо неё */}
-      {background.isBattlemap ? (
+      {/* Карта местности: сетка рисуется ПОВЕРХ картинки, а не вместо неё.
+          Решает активное состояние сцены: «Разрушенная» может быть картой. */}
+      {isBackgroundBattlemap(background) ? (
         <BattleMapGrid mapId={background.id} className="absolute inset-0" />
       ) : null}
     </div>

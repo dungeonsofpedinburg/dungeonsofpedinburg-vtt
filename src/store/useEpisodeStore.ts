@@ -10,7 +10,19 @@ import {
   initialTracks,
 } from "@/data/seed"
 import { generateEpisodeSlug, normalizeEpisodeAssets } from "@/lib/asset-url"
-import { initialsFromName } from "@/lib/character"
+import {
+  DEFAULT_BACKGROUND_STATE_ID,
+  backgroundStates,
+  getBackgroundActiveState,
+} from "@/lib/background"
+import {
+  DEFAULT_CHARACTER_STATE_ID,
+  characterStates,
+  getCharacterActiveState,
+  initialsFromName,
+} from "@/lib/character"
+import { MAX_STAGE_CHARACTERS } from "@/lib/stage"
+import { toast } from "sonner"
 import { initialVideoPlayback, nextSeekId, videoPlaybackForScene } from "@/lib/media"
 import {
   normalizeSoundpadIcon,
@@ -26,7 +38,9 @@ import {
 import type {
   ActGroup,
   Background,
+  BackgroundState,
   Character,
+  CharacterState,
   DiceRollEvent,
   DiceRollResult,
   DieSides,
@@ -37,7 +51,6 @@ import type {
   RollDie,
   SceneNotes,
   SoundpadSlot,
-  StagePhase,
   SyncedEpisode,
   TokenCategory,
   Track,
@@ -45,9 +58,6 @@ import type {
 } from "@/data/types"
 
 export const MAX_DICE_PER_TYPE = 5
-/** Длительность фаз сцены — синхронна с CSS-классами в SceneStage. */
-const STAGE_LEAVE_MS = 350
-const STAGE_ENTER_MS = 350
 
 export type CharacterInput = {
   name: string
@@ -112,10 +122,11 @@ type EpisodeState = {
   /** Сцена в эфире; `null` — в выпуске ещё нет ни одной сцены */
   activeBackgroundId: string | null
   previousBackgroundId: string | null
-  activeCharacterId: string | null
-  stagePhase: StagePhase
-  stageFromCharacterId: string | null
-  stageToCharacterId: string | null
+  /**
+   * Кто стоит на сцене: до четырёх персонажей и предметов сразу. Порядок массива
+   * задаёт раскладку по горизонтали (`characterStagePositions`) и подсветку в рельсе.
+   */
+  activeCharacterIds: string[]
   mapTokens: MapToken[]
   activeMapId: string | null
   /**
@@ -152,6 +163,19 @@ type EpisodeState = {
   renameEpisode: (title: string) => void
   renameBackground: (backgroundId: string, title: string) => void
   updateBackgroundImage: (backgroundId: string, src: string) => void
+  /**
+   * Новый вариант внешнего вида сцены («Ночь», «Пожар»): возвращает его id и
+   * сразу делает активным. Первый вариант материализует «Обычное», чтобы было
+   * куда вернуться.
+   */
+  addBackgroundState: (
+    backgroundId: string,
+    state: Omit<BackgroundState, "id">
+  ) => string
+  /** Переключить состояние сцены: эфир и миниатюры обновляются сразу */
+  setActiveBackgroundState: (backgroundId: string, stateId: string) => void
+  /** Удалить состояние сцены; «Обычное» удалить нельзя */
+  removeBackgroundState: (backgroundId: string, stateId: string) => void
   setActiveMap: (mapId: string) => void
   addBackground: (actGroup: ActGroup, options?: AddBackgroundOptions) => string
   /** Новый разделитель в конце списка: возвращает его имя для инлайн-правки */
@@ -183,6 +207,18 @@ type EpisodeState = {
   addCharacter: (input: CharacterInput) => string
   renameCharacter: (characterId: string, name: string) => void
   updateCharacterImage: (characterId: string, patch: CharacterImagePatch) => void
+  /**
+   * Новый вариант внешнего вида персонажа: возвращает его id и сразу делает
+   * активным. Первый вариант материализует «Обычное», чтобы было куда вернуться.
+   */
+  addCharacterState: (
+    characterId: string,
+    state: Omit<CharacterState, "id">
+  ) => string
+  /** Переключить активное состояние: токен и сцена обновляются сразу */
+  setActiveCharacterState: (characterId: string, stateId: string) => void
+  /** Удалить вариант внешнего вида; «Обычное» удалить нельзя */
+  removeCharacterState: (characterId: string, stateId: string) => void
   setCharacterCategory: (characterId: string, category: TokenCategory) => void
   removeCharacter: (characterId: string) => void
   /** Заметка группы сцен (акта): клик по группе слева — правка справа */
@@ -209,6 +245,8 @@ type EpisodeState = {
   deleteBatchTracks: (ids: string[]) => void
   deleteBatchSoundpadSlots: (ids: string[]) => void
   toggleCharacterOnStage: (characterId: string) => void
+  /** Убрать со сцены всех сразу — клик по превью в Viewport Мастера */
+  clearStage: () => void
   addToken: (
     characterId: string,
     cellX: number,
@@ -216,6 +254,14 @@ type EpisodeState = {
     mapId?: string
   ) => string
   setTokenPosition: (tokenId: string, cellX: number, cellY: number) => void
+  /**
+   * Групповое перемещение выделенных фишек одним обновлением: снапшот на
+   * `/screen` уходит один, поэтому все токены группы прыгают одновременно.
+   * Раскладку клеток считает кластеризация (`clusterTargetCells`).
+   */
+  moveMultipleTokens: (
+    moves: { tokenId: string; cellX: number; cellY: number }[]
+  ) => void
   removeToken: (tokenId: string) => void
   addDie: (sides: DieSides) => void
   removeDie: (sides: DieSides) => void
@@ -362,19 +408,9 @@ function schedulePlaqueFade() {
   }, ROLL_PLAQUE_MS)
 }
 
-/** Таймеры фаз: новый клик по персонажу отменяет незавершённый переход. */
-let stageTimer: ReturnType<typeof setTimeout> | null = null
-function clearStageTimer() {
-  if (stageTimer !== null) {
-    clearTimeout(stageTimer)
-    stageTimer = null
-  }
-}
-
+/** Пустая сцена: никто не стоит — так выпуск и создаётся. */
 const IDLE_STAGE = {
-  stagePhase: "idle" as StagePhase,
-  stageFromCharacterId: null,
-  stageToCharacterId: null,
+  activeCharacterIds: [] as string[],
 }
 
 export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
@@ -387,7 +423,6 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
   soundpad: initialSoundpad,
   activeBackgroundId: initialBackgrounds[0]?.id ?? null,
   previousBackgroundId: null,
-  activeCharacterId: null,
   ...IDLE_STAGE,
   mapTokens: initialMapTokens,
   activeMapId: initialBackgrounds.find((item) => item.isBattlemap)?.id ?? null,
@@ -424,12 +459,81 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
   renameEpisode: (title) =>
     set({ episodeTitle: title, episodeSlug: generateEpisodeSlug(title) }),
 
+  /*
+   * Картинку меняет активное состояние сцены, а не базовые поля: «Обычное» — это
+   * тоже состояние, и замена файла в библиотеке должна менять именно его, а не
+   * подменять картинку «Ночи» или «Пожара» (как у состояний персонажа).
+   */
   updateBackgroundImage: (backgroundId, src) =>
     set((state) => ({
-      backgrounds: state.backgrounds.map((item) =>
-        item.id === backgroundId ? { ...item, src } : item
+      backgrounds: state.backgrounds.map((background) => {
+        if (background.id !== backgroundId) return background
+        const active = getBackgroundActiveState(background)
+        return {
+          ...background,
+          states: backgroundStates(background).map((item) =>
+            item.id === active.id ? { ...item, src } : item
+          ),
+        }
+      }),
+    })),
+
+  addBackgroundState: (backgroundId, input) => {
+    const id = nextId("bg-state")
+    set((state) => ({
+      backgrounds: state.backgrounds.map((background) => {
+        if (background.id !== backgroundId) return background
+        const active = getBackgroundActiveState(background)
+        // Пустой путь у нового варианта означает «то же, что сейчас в эфире»:
+        // чаще всего «Ночь» — это та же сцена с другой картинкой, и до выбора
+        // файла диалог не должен гасить эфир.
+        const state: BackgroundState = {
+          id,
+          name:
+            input.name.trim() ||
+            `Состояние ${backgroundStates(background).length}`,
+          src: input.src || active.src,
+          isBattlemap: input.isBattlemap ?? background.isBattlemap,
+        }
+        return {
+          ...background,
+          states: [...backgroundStates(background), state],
+          activeStateId: id,
+        }
+      }),
+    }))
+    return id
+  },
+
+  setActiveBackgroundState: (backgroundId, stateId) =>
+    set((state) => ({
+      backgrounds: state.backgrounds.map((background) =>
+        background.id === backgroundId &&
+        backgroundStates(background).some((item) => item.id === stateId)
+          ? { ...background, activeStateId: stateId }
+          : background
       ),
     })),
+
+  removeBackgroundState: (backgroundId, stateId) => {
+    // «Обычное» — точка возврата: его не удаляем ни при каких условиях.
+    if (stateId === DEFAULT_BACKGROUND_STATE_ID) return
+    set((state) => ({
+      backgrounds: state.backgrounds.map((background) => {
+        if (background.id !== backgroundId) return background
+        return {
+          ...background,
+          states: (background.states ?? []).filter(
+            (item) => item.id !== stateId
+          ),
+          activeStateId:
+            background.activeStateId === stateId
+              ? DEFAULT_BACKGROUND_STATE_ID
+              : background.activeStateId,
+        }
+      }),
+    }))
+  },
 
   addBackground: (actGroup, options) => {
     const id = nextId("bg")
@@ -786,16 +890,85 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
 
   updateCharacterImage: (characterId, patch) =>
     set((state) => ({
+      characters: state.characters.map((character) => {
+        if (character.id !== characterId) return character
+        const active = getCharacterActiveState(character)
+        // Картинки меняем у активного состояния: при выбранном «Раненом» мастер
+        // правит именно его, а «Обычное» остаётся нетронутым. У «Обычного» те же
+        // картинки лежат и в базовых полях персонажа.
+        if (active.id === DEFAULT_CHARACTER_STATE_ID) {
+          return {
+            ...character,
+            avatarSrc: patch.avatarSrc ?? character.avatarSrc,
+            fullBodyPngSrc: patch.fullBodyPngSrc ?? character.fullBodyPngSrc,
+            states: (character.states ?? []).map((item) =>
+              item.id === DEFAULT_CHARACTER_STATE_ID
+                ? { ...item, ...patch }
+                : item
+            ),
+          }
+        }
+        return {
+          ...character,
+          states: (character.states ?? []).map((item) =>
+            item.id === active.id ? { ...item, ...patch } : item
+          ),
+        }
+      }),
+    })),
+
+  addCharacterState: (characterId, input) => {
+    const id = nextId("state")
+    set((state) => ({
+      characters: state.characters.map((character) => {
+        if (character.id !== characterId) return character
+        // Если картинок у варианта нет, берём базовые: чаще всего «Раненый» —
+        // это тот же персонаж с другим токеном, а иллюстрация остаётся прежней.
+        const state: CharacterState = {
+          id,
+          name: input.name.trim() || `Состояние ${characterStates(character).length}`,
+          avatarSrc: input.avatarSrc || character.avatarSrc,
+          fullBodyPngSrc: input.fullBodyPngSrc || character.fullBodyPngSrc,
+        }
+        return {
+          ...character,
+          states: [...characterStates(character), state],
+          activeStateId: id,
+        }
+      }),
+    }))
+    return id
+  },
+
+  setActiveCharacterState: (characterId, stateId) =>
+    set((state) => ({
       characters: state.characters.map((character) =>
-        character.id === characterId
-          ? {
-              ...character,
-              avatarSrc: patch.avatarSrc ?? character.avatarSrc,
-              fullBodyPngSrc: patch.fullBodyPngSrc ?? character.fullBodyPngSrc,
-            }
+        character.id === characterId &&
+        characterStates(character).some((item) => item.id === stateId)
+          ? { ...character, activeStateId: stateId }
           : character
       ),
     })),
+
+  removeCharacterState: (characterId, stateId) => {
+    // «Обычное» — точка возврата: его не удаляем ни при каких условиях.
+    if (stateId === DEFAULT_CHARACTER_STATE_ID) return
+    set((state) => ({
+      characters: state.characters.map((character) => {
+        if (character.id !== characterId) return character
+        return {
+          ...character,
+          states: (character.states ?? []).filter(
+            (item) => item.id !== stateId
+          ),
+          activeStateId:
+            character.activeStateId === stateId
+              ? DEFAULT_CHARACTER_STATE_ID
+              : character.activeStateId,
+        }
+      }),
+    }))
+  },
 
   setCharacterCategory: (characterId, category) =>
     set((state) => ({
@@ -805,22 +978,18 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
     })),
 
   removeCharacter: (characterId) => {
-    clearStageTimer()
-    set((state) => {
-      const wasStaged =
-        state.activeCharacterId === characterId ||
-        state.stageFromCharacterId === characterId ||
-        state.stageToCharacterId === characterId
-      return {
-        characters: state.characters.filter(
-          (character) => character.id !== characterId
-        ),
-        mapTokens: state.mapTokens.filter(
-          (token) => token.characterId !== characterId
-        ),
-        ...(wasStaged ? { activeCharacterId: null, ...IDLE_STAGE } : {}),
-      }
-    })
+    set((state) => ({
+      characters: state.characters.filter(
+        (character) => character.id !== characterId
+      ),
+      mapTokens: state.mapTokens.filter(
+        (token) => token.characterId !== characterId
+      ),
+      // Удалённый персонаж уходит и со сцены, а остальные сдвигаются к центру.
+      activeCharacterIds: state.activeCharacterIds.filter(
+        (id) => id !== characterId
+      ),
+    }))
   },
 
   addTrack: (input) => {
@@ -883,31 +1052,20 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
 
   deleteBatchCharacters: (ids) => {
     if (ids.length === 0) return
-    clearStageTimer()
     const doomed = new Set(ids)
-    set((state) => {
-      // Если удаляем того, кто сейчас на сцене, — сцену гасим целиком.
-      const wasStaged =
-        Boolean(
-          state.activeCharacterId && doomed.has(state.activeCharacterId)
-        ) ||
-        Boolean(
-          state.stageFromCharacterId && doomed.has(state.stageFromCharacterId)
-        ) ||
-        Boolean(
-          state.stageToCharacterId && doomed.has(state.stageToCharacterId)
-        )
-      return {
-        characters: state.characters.filter(
-          (character) => !doomed.has(character.id)
-        ),
-        // Токены удалённых уходят с карт: висячих фишек не остаётся.
-        mapTokens: state.mapTokens.filter(
-          (token) => !doomed.has(token.characterId)
-        ),
-        ...(wasStaged ? { activeCharacterId: null, ...IDLE_STAGE } : {}),
-      }
-    })
+    set((state) => ({
+      characters: state.characters.filter(
+        (character) => !doomed.has(character.id)
+      ),
+      // Токены удалённых уходят с карт: висячих фишек не остаётся.
+      mapTokens: state.mapTokens.filter(
+        (token) => !doomed.has(token.characterId)
+      ),
+      // Сцена чистится от удалённых: остальные сдвигаются на новые места.
+      activeCharacterIds: state.activeCharacterIds.filter(
+        (id) => !doomed.has(id)
+      ),
+    }))
   },
 
   deleteBatchBackgrounds: (ids) => {
@@ -980,48 +1138,33 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
     }))
   },
 
+  /*
+   * Сцена держит до четырёх фигур сразу: повторный клик убирает персонажа,
+   * новый встаёт в конец — порядок массива задаёт раскладку по горизонтали.
+   * Пятый не пускаем и говорим об этом тостом: лимит — правило сцены.
+   * Выезд и задвигание играет SceneStage: он сравнивает список с предыдущим
+   * кадром, поэтому анимация не требует отдельных фаз в сторе и одинаково
+   * работает в панели Мастера и на /screen (список приезжает снапшотом).
+   */
   toggleCharacterOnStage: (characterId) => {
     const state = useEpisodeStore.getState()
-    const nextCharacterId =
-      state.activeCharacterId === characterId ? null : characterId
-    clearStageTimer()
-
-    // На сцене никого не было — сразу выезд снизу.
-    if (state.activeCharacterId === null && nextCharacterId !== null) {
+    if (state.activeCharacterIds.includes(characterId)) {
       set({
-        activeCharacterId: nextCharacterId,
-        stagePhase: "entering",
-        stageFromCharacterId: null,
-        stageToCharacterId: nextCharacterId,
+        activeCharacterIds: state.activeCharacterIds.filter(
+          (id) => id !== characterId
+        ),
       })
-      stageTimer = setTimeout(() => {
-        stageTimer = null
-        set(IDLE_STAGE)
-      }, STAGE_ENTER_MS)
       return
     }
-
-    // Кто-то на сцене: сначала он уезжает вниз, только потом выезжает новый.
-    set({
-      activeCharacterId: nextCharacterId,
-      stagePhase: "leaving",
-      stageFromCharacterId: state.activeCharacterId,
-      stageToCharacterId: nextCharacterId,
-    })
-    stageTimer = setTimeout(() => {
-      stageTimer = null
-      const target = useEpisodeStore.getState().stageToCharacterId
-      if (!target) {
-        set(IDLE_STAGE)
-        return
-      }
-      set({ stagePhase: "entering", stageToCharacterId: target })
-      stageTimer = setTimeout(() => {
-        stageTimer = null
-        set(IDLE_STAGE)
-      }, STAGE_ENTER_MS)
-    }, STAGE_LEAVE_MS)
+    if (state.activeCharacterIds.length >= MAX_STAGE_CHARACTERS) {
+      toast.warning("Максимум 4 персонажа на сцене")
+      return
+    }
+    set({ activeCharacterIds: [...state.activeCharacterIds, characterId] })
   },
+
+  /** Клик по превью Viewport: сцена пустеет, все фигуры уезжают вниз. */
+  clearStage: () => set({ activeCharacterIds: [] }),
 
   /*
    * Возвращает id токена: панель карт сразу помечает его активным
@@ -1087,6 +1230,36 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
     set((state) => ({
       mapTokens: state.mapTokens.filter((token) => token.id !== tokenId),
     })),
+  /*
+   * Групповой бросок выделенной группы: координаты уже посчитаны
+   * кластеризацией (`clusterTargetCells`), стор только применяет их одним
+   * обновлением. Одна запись состояния — один снапшот на /screen, поэтому на
+   * проекторе вся группа стартует прыжок по дуге в один кадр.
+   */
+  moveMultipleTokens: (moves) => {
+    if (moves.length === 0) return
+    set((state) => {
+      const targets = new Map(
+        moves.map((move) => [
+          move.tokenId,
+          {
+            cellX: clampIndex(move.cellX, GRID_COLUMNS - 1),
+            cellY: clampIndex(move.cellY, GRID_ROWS - 1),
+          },
+        ])
+      )
+      return {
+        mapTokens: state.mapTokens.map((token) => {
+          const target = targets.get(token.id)
+          if (!target) return token
+          if (token.cellX === target.cellX && token.cellY === target.cellY) {
+            return token
+          }
+          return { ...token, cellX: target.cellX, cellY: target.cellY }
+        }),
+      }
+    })
+  },
 
   addDie: (sides) =>
     set((state) => {
@@ -1168,7 +1341,6 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
     set({ syncScreens: Number.isFinite(count) && count > 0 ? Math.trunc(count) : 0 }),
 
   resetEpisode: () => {
-    clearStageTimer()
     clearRollTimers()
     set({
       episodeTitle: campaign.title,
@@ -1180,7 +1352,6 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
       soundpad: initialSoundpad,
       activeBackgroundId: initialBackgrounds[0]?.id ?? null,
       previousBackgroundId: null,
-      activeCharacterId: null,
       ...IDLE_STAGE,
       mapTokens: initialMapTokens,
       activeMapId: initialBackgrounds.find((item) => item.isBattlemap)?.id ?? null,
@@ -1196,7 +1367,6 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
   },
 
   importEpisode: (file) => {
-    clearStageTimer()
     clearRollTimers()
     // Пути из чужой ОС приводим к /assets/... — в сторе живут URL, а не пути
     // Windows (C:\...) или macOS (/Users/...). data-URL и http(s) не трогаем.
@@ -1257,10 +1427,10 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
           ? source.activeBackgroundId
           : firstBackgroundId,
         previousBackgroundId: null,
-        activeCharacterId: hasCharacter(source.activeCharacterId)
-          ? source.activeCharacterId
-          : null,
-        ...IDLE_STAGE,
+        // Сцена собирается из живых персонажей выпуска: чужие id отбрасываем.
+        activeCharacterIds: (source.activeCharacterIds ?? []).filter(
+          (id) => hasCharacter(id)
+        ),
         activeMapId: hasMap(source.activeMapId)
           ? source.activeMapId
           : (orderedBackgrounds.find((item) => item.isBattlemap)?.id ?? null),
@@ -1280,10 +1450,9 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
       characters: remote.characters,
       activeBackgroundId: remote.activeBackgroundId,
       previousBackgroundId: remote.previousBackgroundId,
-      activeCharacterId: remote.activeCharacterId,
-      stagePhase: remote.stagePhase,
-      stageFromCharacterId: remote.stageFromCharacterId,
-      stageToCharacterId: remote.stageToCharacterId,
+      // Сцена приезжает снапшотом целиком: SceneStage сам сравнит список с
+      // предыдущим кадром и проиграет выезд/задвигание фигур.
+      activeCharacterIds: remote.activeCharacterIds ?? [],
       mapTokens: remote.mapTokens,
       activeMapId: remote.activeMapId,
       lastRoll: remote.lastRoll,

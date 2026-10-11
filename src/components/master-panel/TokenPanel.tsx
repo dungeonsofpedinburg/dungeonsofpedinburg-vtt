@@ -1,8 +1,18 @@
 import { useRef, useState } from "react"
 import type { DragEvent, PointerEvent as ReactPointerEvent } from "react"
-import { ImagePlus, ListChecks, Pencil, Plus, Tag, Trash2 } from "lucide-react"
+import {
+  Check,
+  ImagePlus,
+  Layers,
+  ListChecks,
+  Pencil,
+  Plus,
+  Tag,
+  Trash2,
+} from "lucide-react"
 import { BatchSelectionBar } from "@/components/master-panel/BatchSelectionBar"
 import {
+  AddCharacterStateDialog,
   RenameCharacterDialog,
   ReplaceCharacterImageDialog,
 } from "@/components/master-panel/CharacterDialog"
@@ -26,6 +36,12 @@ import {
   ContextMenuTrigger,
 } from "@/components/ui/context-menu"
 import { tokenCategories } from "@/data/content"
+import {
+  DEFAULT_CHARACTER_STATE_ID,
+  characterAvatarSrc,
+  characterStates,
+  getCharacterActiveState,
+} from "@/lib/character"
 import { useBatchSelection } from "@/hooks/useBatchSelection"
 import { useEpisodeStore } from "@/store/useEpisodeStore"
 import { cn } from "@/lib/utils"
@@ -92,6 +108,7 @@ export function TokenPanel({
 }: TokenPanelProps) {
   const characters = useEpisodeStore((state) => state.characters)
   const mapTokens = useEpisodeStore((state) => state.mapTokens)
+  const activeCharacterIds = useEpisodeStore((state) => state.activeCharacterIds)
   const setCharacterCategory = useEpisodeStore(
     (state) => state.setCharacterCategory
   )
@@ -103,6 +120,13 @@ export function TokenPanel({
     (state) => state.updateCharacterImage
   )
   const removeCharacter = useEpisodeStore((state) => state.removeCharacter)
+  const addCharacterState = useEpisodeStore((state) => state.addCharacterState)
+  const setActiveCharacterState = useEpisodeStore(
+    (state) => state.setActiveCharacterState
+  )
+  const removeCharacterState = useEpisodeStore(
+    (state) => state.removeCharacterState
+  )
   const deleteBatchCharacters = useEpisodeStore(
     (state) => state.deleteBatchCharacters
   )
@@ -114,6 +138,8 @@ export function TokenPanel({
   const [overCategory, setOverCategory] = useState<TokenCategory | null>(null)
   const [renameTargetId, setRenameTargetId] = useState<string | null>(null)
   const [replaceTargetId, setReplaceTargetId] = useState<string | null>(null)
+  /** Персонаж, которому добавляют новое состояние внешнего вида. */
+  const [stateTargetId, setStateTargetId] = useState<string | null>(null)
   // Точка нажатия: если указатель уехал больше 4 px — это драг, а не клик.
   const pressRef = useRef<{ x: number; y: number } | null>(null)
 
@@ -121,6 +147,8 @@ export function TokenPanel({
     characters.find((character) => character.id === renameTargetId) ?? null
   const replaceTarget =
     characters.find((character) => character.id === replaceTargetId) ?? null
+  const stateTarget =
+    characters.find((character) => character.id === stateTargetId) ?? null
 
   const tokensOnMap = mapId
     ? mapTokens.filter((token) => token.mapId === mapId)
@@ -211,6 +239,11 @@ export function TokenPanel({
                 )
                 const isSelected = character.id === selectedCharacterId
                 const batchSelected = batch.isSelected(character.id)
+                // Персонаж на сцене: в рельсе его отмечает золотая рамка.
+                const isOnStage = activeCharacterIds.includes(character.id)
+                // Токен показывает активное состояние персонажа («Раненый» и т. д.).
+                const avatarSrc = characterAvatarSrc(character)
+                const activeStateId = getCharacterActiveState(character).id
                 return (
                   <ContextMenu key={character.id}>
                     <ContextMenuTrigger asChild>
@@ -281,7 +314,9 @@ export function TokenPanel({
                             ? `${character.name} — клик отмечает персонажа`
                             : onCardClick
                               ? `${character.name} — клик: выбрать токен; перетащите на поле или в другую колонку`
-                              : `${character.name} — клик: на сцену, ПКМ — правка`
+                              : isOnStage
+                                ? `${character.name} — на сцене; клик: убрать со сцены`
+                                : `${character.name} — клик: на сцену (до четырёх сразу), ПКМ — правка`
                         }
                         className={cn(
                           "border-2 select-none touch-none",
@@ -303,13 +338,17 @@ export function TokenPanel({
                           draggingId === character.id && "opacity-60",
                           // Отметка в режиме множественного выделения.
                           batchSelected &&
-                            "ring-2 ring-ring ring-offset-2 ring-offset-background"
+                            "ring-2 ring-ring ring-offset-2 ring-offset-background",
+                          // Персонаж на сцене: золотая рамка (до четырёх сразу).
+                          isOnStage &&
+                            !batchSelected &&
+                            "ring-2 ring-amber-500 ring-offset-2 ring-offset-background"
                         )}
                       >
                     {isIcons ? (
-                      character.avatarSrc ? (
+                      avatarSrc ? (
                         <img
-                          src={character.avatarSrc}
+                          src={avatarSrc}
                           alt={character.name}
                           draggable={false}
                           className="size-full object-cover object-top"
@@ -332,9 +371,9 @@ export function TokenPanel({
                             tokenStyles[character.category]
                           )}
                         >
-                          {character.avatarSrc ? (
+                          {avatarSrc ? (
                             <img
-                              src={character.avatarSrc}
+                              src={avatarSrc}
                               alt={character.name}
                               draggable={false}
                               className="size-full object-cover object-top"
@@ -387,6 +426,52 @@ export function TokenPanel({
                         <Pencil />
                         Переименовать
                       </ContextMenuItem>
+                      {/* Внешний вид: «Обычное» + варианты, добавленные мастером. */}
+                      <ContextMenuSub>
+                        <ContextMenuSubTrigger>
+                          <Layers />
+                          Состояние
+                        </ContextMenuSubTrigger>
+                        <ContextMenuSubContent className="w-56">
+                          {characterStates(character).map((state) => {
+                            const isActive = state.id === activeStateId
+                            return (
+                              <ContextMenuItem
+                                key={state.id}
+                                onSelect={() =>
+                                  setActiveCharacterState(character.id, state.id)
+                                }
+                              >
+                                <span className="flex size-4 shrink-0 items-center justify-center">
+                                  {isActive ? <Check className="size-3.5" /> : null}
+                                </span>
+                                <span className="truncate">{state.name}</span>
+                              </ContextMenuItem>
+                            )
+                          })}
+                          <ContextMenuSeparator />
+                          <ContextMenuItem
+                            onSelect={() => setStateTargetId(character.id)}
+                          >
+                            <Plus />
+                            Добавить состояние...
+                          </ContextMenuItem>
+                          {activeStateId !== DEFAULT_CHARACTER_STATE_ID ? (
+                            <>
+                              <ContextMenuSeparator />
+                              <ContextMenuItem
+                                variant="destructive"
+                                onSelect={() =>
+                                  removeCharacterState(character.id, activeStateId)
+                                }
+                              >
+                                <Trash2 />
+                                Удалить активное состояние
+                              </ContextMenuItem>
+                            </>
+                          ) : null}
+                        </ContextMenuSubContent>
+                      </ContextMenuSub>
                       {allowCategoryDrag ? null : (
                         <ContextMenuSub>
                           <ContextMenuSubTrigger>
@@ -470,6 +555,18 @@ export function TokenPanel({
         }}
         onReplace={(patch) => {
           if (replaceTarget) updateCharacterImage(replaceTarget.id, patch)
+        }}
+      />
+      {/* Новый вариант внешнего вида: стор сразу делает его активным. */}
+      <AddCharacterStateDialog
+        key={stateTargetId ?? "state-none"}
+        open={Boolean(stateTarget)}
+        character={stateTarget}
+        onOpenChange={(open) => {
+          if (!open) setStateTargetId(null)
+        }}
+        onSubmit={(state) => {
+          if (stateTarget) addCharacterState(stateTarget.id, state)
         }}
       />
     </div>

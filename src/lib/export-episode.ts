@@ -10,7 +10,12 @@ import {
   toAssetUrl,
 } from "@/lib/asset-url"
 import { saveAssetToLibrary } from "@/lib/asset-upload"
-import type { EpisodeFile, GroupTracks, TokenCategory } from "@/data/types"
+import type {
+  CharacterState,
+  EpisodeFile,
+  GroupTracks,
+  TokenCategory,
+} from "@/data/types"
 
 /**
  * Экспорт выпуска: файл `episode.json` везёт ТОЛЬКО текстовые данные — разметку
@@ -76,9 +81,27 @@ export function episodeAssetFields(file: EpisodeFile) {
       field: `backgrounds[${index}].src`,
       value: item.src,
     })),
+    // Состояния сцены: «Ночь», «Пожар» — их кадры тоже обязаны уехать в папку.
+    ...file.backgrounds.flatMap((item, index) =>
+      (item.states ?? []).map((state, stateIndex) => ({
+        field: `backgrounds[${index}].states[${stateIndex}].src`,
+        value: state.src,
+      }))
+    ),
     ...file.characters.flatMap((item, index) => [
       { field: `characters[${index}].avatarSrc`, value: item.avatarSrc },
       { field: `characters[${index}].fullBodyPngSrc`, value: item.fullBodyPngSrc },
+      // Варианты внешнего вида: их картинки тоже обязаны уехать в папку выпуска.
+      ...(item.states ?? []).flatMap((state, stateIndex) => [
+        {
+          field: `characters[${index}].states[${stateIndex}].avatarSrc`,
+          value: state.avatarSrc,
+        },
+        {
+          field: `characters[${index}].states[${stateIndex}].fullBodyPngSrc`,
+          value: state.fullBodyPngSrc,
+        },
+      ]),
     ]),
     ...file.tracks.flatMap((item, index) => [
       { field: `tracks[${index}].audioSrc`, value: item.audioSrc },
@@ -139,6 +162,14 @@ export function sanitizeEpisodeForExport(file: EpisodeFile) {
     backgrounds: file.backgrounds.map((item, index) => ({
       ...item,
       src: clean(item.src, `backgrounds[${index}].src`),
+      // Кадры состояний сцены чистим так же, как базовый: встроенные выбрасываем.
+      states: (item.states ?? []).map((state, stateIndex) => ({
+        ...state,
+        src: clean(
+          state.src,
+          `backgrounds[${index}].states[${stateIndex}].src`
+        ),
+      })),
     })),
     characters: file.characters.map((item, index) => ({
       ...item,
@@ -147,6 +178,18 @@ export function sanitizeEpisodeForExport(file: EpisodeFile) {
         item.fullBodyPngSrc,
         `characters[${index}].fullBodyPngSrc`
       ),
+      // Картинки вариантов внешнего вида чистим так же, как базовые.
+      states: (item.states ?? []).map((state, stateIndex) => ({
+        ...state,
+        avatarSrc: clean(
+          state.avatarSrc,
+          `characters[${index}].states[${stateIndex}].avatarSrc`
+        ),
+        fullBodyPngSrc: clean(
+          state.fullBodyPngSrc,
+          `characters[${index}].states[${stateIndex}].fullBodyPngSrc`
+        ),
+      })),
     })),
     tracks: file.tracks.map((item, index) => ({
       ...item,
@@ -269,16 +312,33 @@ export async function persistEpisodeAssets(file: EpisodeFile, episodeSlug: strin
   }
 
   const backgrounds = await Promise.all(
-    file.backgrounds.map(async (item, index) => ({
-      ...item,
-      src: await persist(
-        `backgrounds[${index}].src`,
-        inEpisode(ASSET_FOLDERS.scenes),
-        item.id,
-        item.title,
-        item.src
-      ),
-    }))
+    file.backgrounds.map(async (item, index) => {
+      // Состояния сцены («Ночь», «Пожар»): встроенные кадры выгружаем вместе с
+      // базовым, иначе на машине Мастера их просто не окажется.
+      const states = await Promise.all(
+        (item.states ?? []).map(async (state, stateIndex) => ({
+          ...state,
+          src: await persist(
+            `backgrounds[${index}].states[${stateIndex}].src`,
+            inEpisode(ASSET_FOLDERS.scenes),
+            `${item.id}-${state.id}`,
+            `${item.title} ${state.name}`,
+            state.src
+          ),
+        }))
+      )
+      return {
+        ...item,
+        states,
+        src: await persist(
+          `backgrounds[${index}].src`,
+          inEpisode(ASSET_FOLDERS.scenes),
+          item.id,
+          item.title,
+          item.src
+        ),
+      }
+    })
   )
 
   const characters = await Promise.all(
@@ -286,8 +346,31 @@ export async function persistEpisodeAssets(file: EpisodeFile, episodeSlug: strin
       // Предметы (`category: "item"`) лежат в своей папке `items/` — рядом с
       // прочими медиа выпуска, а не среди персонажей.
       const folder = inEpisode(characterAssetFolder(item.category))
+      // Варианты внешнего вида: встроенные картинки выгружаем вместе с базовыми,
+      // иначе на машине Мастера не окажется «Раненого» и прочих состояний.
+      const states: CharacterState[] = []
+      for (const [stateIndex, state] of (item.states ?? []).entries()) {
+        const [avatarSrc, fullBodyPngSrc] = await Promise.all([
+          persist(
+            `characters[${index}].states[${stateIndex}].avatarSrc`,
+            folder,
+            `${item.id}-${state.id}`,
+            `${item.name} ${state.name} токен`,
+            state.avatarSrc
+          ),
+          persist(
+            `characters[${index}].states[${stateIndex}].fullBodyPngSrc`,
+            folder,
+            `${item.id}-${state.id}`,
+            `${item.name} ${state.name}`,
+            state.fullBodyPngSrc
+          ),
+        ])
+        states.push({ ...state, avatarSrc, fullBodyPngSrc })
+      }
       return {
         ...item,
+        states,
         avatarSrc: await persist(
           `characters[${index}].avatarSrc`,
           folder,

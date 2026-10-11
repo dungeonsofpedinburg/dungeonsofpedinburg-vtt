@@ -312,6 +312,16 @@ export async function runAssetServerSmoke() {
             category: "hero",
             avatarSrc: SMOKE_PNG,
             fullBodyPngSrc: "",
+            // Вариант внешнего вида: его картинки тоже должны уехать в выпуск.
+            states: [
+              {
+                id: "wounded",
+                name: "Раненый",
+                avatarSrc: SMOKE_PNG,
+                fullBodyPngSrc: SMOKE_PNG,
+              },
+            ],
+            activeStateId: "wounded",
           },
           {
             id: "item-smoke-sword",
@@ -346,7 +356,8 @@ export async function runAssetServerSmoke() {
       },
       EPISODE_SLUG
     )
-    // Пути по папкам выпуска: сцена, персонаж, предмет, музыка, звук, трек акта.
+    // Пути по папкам выпуска: сцена, персонаж, предмет, музыка, звук, трек акта,
+    // картинки состояния персонажа.
     const exportedFolders = [
       episodeExport.file.backgrounds[0].src,
       episodeExport.file.characters[0].avatarSrc,
@@ -354,6 +365,8 @@ export async function runAssetServerSmoke() {
       episodeExport.file.tracks[0].audioSrc,
       episodeExport.file.soundpad[0].src,
       episodeExport.file.groupTracks?.["Завязка"]?.src ?? "",
+      episodeExport.file.characters[0].states?.[0].avatarSrc ?? "",
+      episodeExport.file.characters[0].states?.[0].fullBodyPngSrc ?? "",
     ]
     const exportedFiles = exportedFolders.map((url) =>
       resolve(episodesRoot, url.slice(EPISODES_URL.length))
@@ -381,6 +394,12 @@ export async function runAssetServerSmoke() {
           `${EPISODES_URL}${EPISODE_SLUG}/soundpad/`
         ) &&
         exportedFolders[5].startsWith(`${EPISODES_URL}${EPISODE_SLUG}/music/`) &&
+        exportedFolders[6].startsWith(
+          `${EPISODES_URL}${EPISODE_SLUG}/characters/`
+        ) &&
+        exportedFolders[7].startsWith(
+          `${EPISODES_URL}${EPISODE_SLUG}/characters/`
+        ) &&
         exportedFiles.every((file) => existsSync(file)) &&
         servedExport.status === 200,
       exportedFolders.join(" · ")

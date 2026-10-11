@@ -1,10 +1,12 @@
 import { useMemo, useRef, useState } from "react"
 import type { ChangeEvent, DragEvent } from "react"
 import {
+  Check,
   Copy,
   Grid3x3,
   GripVertical,
   ImagePlus,
+  Layers,
   ListChecks,
   Music,
   Pencil,
@@ -13,6 +15,7 @@ import {
   ScrollText,
   Trash2,
 } from "lucide-react"
+import { AddBackgroundStateDialog } from "@/components/master-panel/BackgroundStateDialog"
 import { BatchSelectionBar } from "@/components/master-panel/BatchSelectionBar"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -33,11 +36,22 @@ import {
   ContextMenuItem,
   ContextMenuLabel,
   ContextMenuSeparator,
+  ContextMenuSub,
+  ContextMenuSubContent,
+  ContextMenuSubTrigger,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu"
 import { Separator } from "@/components/ui/separator"
 import { backgroundIcon } from "@/data/seed"
 import { useBatchSelection } from "@/hooks/useBatchSelection"
+import {
+  DEFAULT_BACKGROUND_STATE_ID,
+  backgroundStateSrc,
+  backgroundStates,
+  getBackgroundActiveState,
+  hasCustomBackgroundStates,
+  isBackgroundBattlemap,
+} from "@/lib/background"
 import {
   assetFileName,
   episodeAssetFolder,
@@ -50,9 +64,16 @@ import { isVideoFile, isVideoSrc } from "@/lib/media"
 import { prepareVideoFile } from "@/lib/video-file"
 import { useEpisodeStore } from "@/store/useEpisodeStore"
 import { cn, fileNameWithoutExtension } from "@/lib/utils"
+import { toast } from "sonner"
 
 /** MIME перетаскиваемого разделителя: сцены едут обычным text/plain. */
 const SCENE_GROUP_MIME = "application/x-pedinburg-scene-group"
+
+/**
+ * id тоста пакетного импорта сцен: по нему прогресс («2 из 5») заменяется
+ * итогом, а не копится столбиком уведомлений.
+ */
+const SCENE_IMPORT_TOAST_ID = "scene-import"
 
 /** Что принимает проводник для сцены: картинка или видео-фон. */
 const SCENE_FILE_ACCEPT = "image/*,video/mp4,video/webm"
@@ -86,6 +107,15 @@ export function BackgroundLibrary() {
   const updateBackgroundImage = useEpisodeStore(
     (state) => state.updateBackgroundImage
   )
+  const addBackgroundState = useEpisodeStore(
+    (state) => state.addBackgroundState
+  )
+  const setActiveBackgroundState = useEpisodeStore(
+    (state) => state.setActiveBackgroundState
+  )
+  const removeBackgroundState = useEpisodeStore(
+    (state) => state.removeBackgroundState
+  )
   const addSceneGroup = useEpisodeStore((state) => state.addSceneGroup)
   const renameSceneGroup = useEpisodeStore((state) => state.renameSceneGroup)
   const removeSceneGroup = useEpisodeStore((state) => state.removeSceneGroup)
@@ -109,8 +139,8 @@ export function BackgroundLibrary() {
   } | null>(null)
   const [renameValue, setRenameValue] = useState("")
   const [imageTargetId, setImageTargetId] = useState<string | null>(null)
-  const [imageError, setImageError] = useState<string | null>(null)
-  const [sceneNotice, setSceneNotice] = useState("")
+  /** Сцена, которой добавляют новое состояние фона («Ночь», «Пожар»). */
+  const [stateTargetId, setStateTargetId] = useState<string | null>(null)
   const [isImportingScenes, setIsImportingScenes] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const groupImagesInputRef = useRef<HTMLInputElement>(null)
@@ -121,6 +151,10 @@ export function BackgroundLibrary() {
   /** Сцена, созданная кнопкой «+»: её занимает первый файл пакетного импорта. */
   const pendingSceneRef = useRef<{ id: string; group: string } | null>(null)
 
+  /** Сцена, для которой сейчас правят состояния (сравнивается с null). */
+  const stateTarget =
+    backgrounds.find((item) => item.id === stateTargetId) ?? null
+
   function pickSceneImage(backgroundId: string) {
     setImageTargetId(backgroundId)
     fileInputRef.current?.click()
@@ -129,7 +163,6 @@ export function BackgroundLibrary() {
   /** Кнопка «+» у разделителя: выбираем аудиофайл для музыки акта. */
   function pickGroupTrack(groupName: string) {
     setTrackTarget(groupName)
-    setImageError(null)
     groupTrackInputRef.current?.click()
   }
 
@@ -159,7 +192,7 @@ export function BackgroundLibrary() {
         prepared.dataUrl
       )
       if (!upload.ok) {
-        setImageError(`Трек не выложился: ${upload.error}`)
+        toast.error("Трек не выложился", { description: upload.error })
         return
       }
       setGroupTrack(group, {
@@ -167,13 +200,13 @@ export function BackgroundLibrary() {
         title: prepared.title,
         src: upload.url,
       })
-      setSceneNotice(
-        `Музыка акта «${group}»: ${prepared.title}${
+      toast.success(`Музыка акта «${group}»`, {
+        description: `${prepared.title}${
           prepared.warning ? ` · ${prepared.warning}` : ""
-        }`
-      )
+        }`,
+      })
     } catch (thrown) {
-      setImageError(
+      toast.error(
         thrown instanceof Error ? thrown.message : "Не удалось прочитать файл"
       )
     } finally {
@@ -196,7 +229,8 @@ export function BackgroundLibrary() {
       const prepared = await prepareVideoFile(file, { ...options, episodeSlug })
       return { src: prepared.src, warning: prepared.warning }
     }
-    // Сцена уезжает на проектор 1920×880 — режем до 1920 px, а не до 1024.
+    // Сцена — 1440×1080 (4:3), проектор может быть 4K: держим запас до 1920 px,
+    // чтобы кадр не превращался в мыло при растягивании масштабом.
     const prepared = await prepareImageFile(file, { maxSide: 1920 })
     return { src: prepared.dataUrl, warning: prepared.warning }
   }
@@ -213,9 +247,11 @@ export function BackgroundLibrary() {
         label: fileNameWithoutExtension(file.name),
       })
       updateBackgroundImage(backgroundId, prepared.src)
-      if (prepared.warning) setSceneNotice(prepared.warning)
+      toast.success("Картинка сцены обновлена", {
+        description: prepared.warning,
+      })
     } catch (thrown) {
-      setImageError(
+      toast.error(
         thrown instanceof Error ? thrown.message : "Не удалось обработать файл"
       )
     }
@@ -244,14 +280,14 @@ export function BackgroundLibrary() {
     if (!pending || files.length === 0) return
 
     setIsImportingScenes(true)
-    setSceneNotice("")
     const problems: string[] = []
     let imported = 0
 
     for (const [index, file] of files.entries()) {
-      setSceneNotice(
-        `Импорт сцен: ${index + 1} из ${files.length} — ${file.name}`
-      )
+      // Прогресс живёт в том же тосте: id задан, поэтому сообщения заменяют друг друга.
+      toast.info(`Импорт сцен: ${index + 1} из ${files.length} — ${file.name}`, {
+        id: SCENE_IMPORT_TOAST_ID,
+      })
       try {
         const prepared = await prepareSceneMedia(file, {
           // Имя файла ассета: у первой сцены — её id (файл перезаписывается при
@@ -283,8 +319,16 @@ export function BackgroundLibrary() {
     }
 
     setIsImportingScenes(false)
-    setSceneNotice(`Добавлено сцен: ${imported} из ${files.length}`)
-    if (problems.length > 0) setImageError(problems.join("; "))
+    // Прогресс и итог — один и тот же тост: sonner заменяет его по id.
+    toast.success(`Добавлено сцен: ${imported} из ${files.length}`, {
+      id: SCENE_IMPORT_TOAST_ID,
+    })
+    if (problems.length > 0) {
+      toast.error("Часть сцен не добавилась", {
+        description: problems.join("; "),
+        duration: 6000,
+      })
+    }
   }
 
   // Порядок полностью ручной: разделители живут в сторе, карты не всплывают.
@@ -350,10 +394,6 @@ export function BackgroundLibrary() {
 
   return (
     <div className="flex shrink-0 flex-col gap-4">
-        {sceneNotice ? (
-          <p className="text-xs text-muted-foreground">{sceneNotice}</p>
-        ) : null}
-
         {/* Пустой выпуск: подсказываем, с чего начать, вместо пустого списка. */}
         {backgrounds.length === 0 ? (
           <p className="rounded-lg border border-dashed border-border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
@@ -524,6 +564,10 @@ export function BackgroundLibrary() {
                 const isDragging = background.id === dragId
                 const isOver = background.id === overId
                 const isSelected = batch.isSelected(background.id)
+                // Миниатюра и статус карты — по активному состоянию сцены.
+                const stateSrc = backgroundStateSrc(background)
+                const activeState = getBackgroundActiveState(background)
+                const hasStates = hasCustomBackgroundStates(background)
 
                 return (
                   <ContextMenu key={background.id}>
@@ -584,11 +628,11 @@ export function BackgroundLibrary() {
                             "ring-2 ring-ring ring-offset-2 ring-offset-background"
                         )}
                       >
-                        {background.src ? (
-                          isVideoSrc(background.src) ? (
+                        {stateSrc ? (
+                          isVideoSrc(stateSrc) ? (
                             // Кадр видео-сцены: без звука и без автоплея — только превью.
                             <video
-                              src={background.src}
+                              src={stateSrc}
                               muted
                               playsInline
                               preload="metadata"
@@ -596,7 +640,7 @@ export function BackgroundLibrary() {
                             />
                           ) : (
                             <img
-                              src={background.src}
+                              src={stateSrc}
                               alt={background.title}
                               draggable={false}
                               className="absolute inset-0 size-full object-cover"
@@ -618,13 +662,29 @@ export function BackgroundLibrary() {
                         </span>
 
                         {/* Место в углу занято чекбоксом режима выделения. */}
-                        {background.isBattlemap && !batch.isSelecting ? (
+                        {isBackgroundBattlemap(background) && !batch.isSelecting ? (
                           <Badge
                             variant="secondary"
                             className="absolute top-1 left-1 gap-1"
                           >
                             <Grid3x3 />
                             Карта
+                          </Badge>
+                        ) : null}
+
+                        {/* Активное состояние видно на миниатюре: «Ночь», «Пожар». */}
+                        {hasStates && !batch.isSelecting ? (
+                          <Badge
+                            variant="outline"
+                            className="absolute top-1 left-1 gap-1 bg-background/80 backdrop-blur-sm"
+                            style={
+                              isBackgroundBattlemap(background)
+                                ? { top: "1.75rem" }
+                                : undefined
+                            }
+                          >
+                            <Layers />
+                            {activeState.name}
                           </Badge>
                         ) : null}
 
@@ -680,6 +740,60 @@ export function BackgroundLibrary() {
                           ? "Убрать статус карты"
                           : "Сделать картой местности"}
                       </ContextMenuItem>
+                      <ContextMenuSub>
+                        <ContextMenuSubTrigger>
+                          <Layers />
+                          Состояние
+                        </ContextMenuSubTrigger>
+                        <ContextMenuSubContent className="w-56">
+                          {backgroundStates(background).map((state) => {
+                            const isStateActive =
+                              state.id === activeState.id
+                            return (
+                              <ContextMenuItem
+                                key={state.id}
+                                onSelect={() =>
+                                  setActiveBackgroundState(
+                                    background.id,
+                                    state.id
+                                  )
+                                }
+                              >
+                                <span className="flex size-4 shrink-0 items-center justify-center">
+                                  {isStateActive ? (
+                                    <Check className="size-3.5" />
+                                  ) : null}
+                                </span>
+                                <span className="truncate">{state.name}</span>
+                              </ContextMenuItem>
+                            )
+                          })}
+                          <ContextMenuSeparator />
+                          <ContextMenuItem
+                            onSelect={() => setStateTargetId(background.id)}
+                          >
+                            <Plus />
+                            Добавить состояние...
+                          </ContextMenuItem>
+                          {activeState.id !== DEFAULT_BACKGROUND_STATE_ID ? (
+                            <>
+                              <ContextMenuSeparator />
+                              <ContextMenuItem
+                                variant="destructive"
+                                onSelect={() =>
+                                  removeBackgroundState(
+                                    background.id,
+                                    activeState.id
+                                  )
+                                }
+                              >
+                                <Trash2 />
+                                Удалить активное состояние
+                              </ContextMenuItem>
+                            </>
+                          ) : null}
+                        </ContextMenuSubContent>
+                      </ContextMenuSub>
                       <ContextMenuItem
                         onSelect={() => {
                           setRenameTarget({
@@ -771,23 +885,6 @@ export function BackgroundLibrary() {
         />
 
         <Dialog
-          open={Boolean(imageError)}
-          onOpenChange={(open) => {
-            if (!open) setImageError(null)
-          }}
-        >
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle>Не удалось загрузить картинку сцены</DialogTitle>
-              <DialogDescription>{imageError}</DialogDescription>
-            </DialogHeader>
-            <DialogFooter>
-              <Button onClick={() => setImageError(null)}>Понятно</Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
-
-        <Dialog
           open={Boolean(renameTarget)}
           onOpenChange={(open) => {
             if (!open) setRenameTarget(null)
@@ -822,6 +919,21 @@ export function BackgroundLibrary() {
             </DialogFooter>
           </DialogContent>
         </Dialog>
+
+        {/* Новое состояние сцены: стор сразу делает его активным, поэтому эфир
+            и миниатюра переключаются на «Ночь» или «Пожар» через кроссфейд. */}
+        <AddBackgroundStateDialog
+          key={stateTargetId ?? "scene-state-none"}
+          open={Boolean(stateTarget)}
+          background={stateTarget}
+          prepareMedia={prepareSceneMedia}
+          onOpenChange={(open) => {
+            if (!open) setStateTargetId(null)
+          }}
+          onSubmit={(state) => {
+            if (stateTarget) addBackgroundState(stateTarget.id, state)
+          }}
+        />
     </div>
   )
 }

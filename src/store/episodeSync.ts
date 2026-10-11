@@ -2,9 +2,14 @@ import { useEpisodeStore } from "@/store/useEpisodeStore"
 import type { RollDie, SyncedEpisode } from "@/data/types"
 
 /**
- * Синхронизация Мастер-панели и экрана OBS через локальный WebSocket-сервер
- * (server/index.mjs, порт 5174). BroadcastChannel тут не подходит: OBS Browser
- * Source — отдельный процесс CEF, и между окнами канал не связывается.
+ * Синхронизация Мастер-панели и экрана `/screen` двумя транспортами:
+ * 1. локальный WebSocket-сервер (server/index.mjs, порт 5174) — единственный
+ *    путь к OBS Browser Source и к проектору на другой машине: OBS — отдельный
+ *    процесс CEF, между окнами BroadcastChannel не связывается;
+ * 2. тот же браузер и origin — BroadcastChannel: доставка в том же тике, без
+ *    круга через сервер (и даже если сервер не поднят).
+ * Оба транспорта везут один и тот же JSON: экран применяет первый пришедший и
+ * игнорирует дубль, поэтому «мгновенно» и «надёжно» не мешают друг другу.
  */
 export const SYNC_DEFAULT_PORT = 5174
 
@@ -54,8 +59,11 @@ export type SyncInfo = {
   presence: SyncPresence
 }
 
-/** Небольшой debounce вместо rAF: доставляет состояние даже из фоновой вкладки. */
-const SNAPSHOT_DELAY_MS = 30
+/**
+ * Имя локального канала: Мастер и `/screen` в одном браузере видят состояние
+ * мгновенно, без круга через сервер (и даже если сервер не поднят).
+ */
+const LOCAL_CHANNEL_NAME = "pedinburg-episode-sync"
 /** Нарастающие паузы переподключения, мс; последнее значение повторяется бесконечно. */
 const RETRY_DELAYS_MS = [250, 500, 1000, 2000, 4000]
 const RETRY_JITTER = 0.2
@@ -72,10 +80,13 @@ let presence: SyncPresence = { masters: 0, screens: 0 }
 let info: SyncInfo = { status: "idle", role: null, endpoint: null, presence }
 
 let unsubscribeStore: (() => void) | null = null
-let scheduled: ReturnType<typeof setTimeout> | null = null
 let retryTimer: ReturnType<typeof setTimeout> | null = null
+/** Локальный канал «второй вкладки»: транспорт, которому сервер не нужен вовсе. */
+let localChannel: BroadcastChannel | null = null
 /** Последний отправленный JSON снапшота: не гоняем мегабайты картинок повторно. */
 let lastSnapshot: string | null = null
+/** Последний применённый экраном JSON: дубль из второго транспорта не рисуем снова. */
+let lastAppliedSnapshot: string | null = null
 
 const infoListeners = new Set<() => void>()
 
@@ -106,10 +117,7 @@ function createSnapshot(): SyncedEpisode {
     characters: state.characters,
     activeBackgroundId: state.activeBackgroundId,
     previousBackgroundId: state.previousBackgroundId,
-    activeCharacterId: state.activeCharacterId,
-    stagePhase: state.stagePhase,
-    stageFromCharacterId: state.stageFromCharacterId,
-    stageToCharacterId: state.stageToCharacterId,
+    activeCharacterIds: state.activeCharacterIds,
     mapTokens: state.mapTokens,
     activeMapId: state.activeMapId,
     lastRoll: state.lastRoll,
@@ -162,13 +170,17 @@ export function postRollResult(
 }
 
 /**
+ * Отправляет снапшот стора немедленно — в том же тике, в котором Мастер нажал
+ * сцену. Никакого debounce/setTimeout: раньше состояние ждало 30 мс, и экран
+ * приходил с задержкой, которую Мастер видел как «клик не сработал».
+ *
+ * Один и тот же JSON уходит сразу в сокет и в локальный канал; экран применит
+ * первый пришедший (обычно это канал — он не ходит на сервер).
+ *
  * @param force true — отвечаем на запрос экрана и шлём снапшот даже без изменений
  * (сервер мог потерять кэш, тогда молчать нельзя).
  */
 function flushSnapshot(force = false) {
-  scheduled = null
-  if (!socket || socket.readyState !== WebSocket.OPEN) return
-
   const json = JSON.stringify({
     type: "state",
     payload: createSnapshot(),
@@ -176,12 +188,34 @@ function flushSnapshot(force = false) {
 
   if (!force && json === lastSnapshot) return
   lastSnapshot = json
-  socket.send(json)
+
+  // Сокета может не быть вовсе (сервер не поднят, идёт переподключение):
+  // локальная вкладка `/screen` всё равно получит состояние по каналу.
+  if (socket && socket.readyState === WebSocket.OPEN) socket.send(json)
+  localChannel?.postMessage(json)
 }
 
-function scheduleSnapshot() {
-  if (scheduled !== null) return
-  scheduled = setTimeout(() => flushSnapshot(), SNAPSHOT_DELAY_MS)
+/**
+ * Локальный канал «второго окна»: мастер шлёт в него снапшоты, `/screen` слушает.
+ * В Node (смоук-прогон) канал держал бы процесс открытым — снимаем ссылку.
+ */
+function openLocalChannel() {
+  if (typeof BroadcastChannel === "undefined") return
+
+  const channel = new BroadcastChannel(LOCAL_CHANNEL_NAME)
+  ;(channel as BroadcastChannel & { unref?: () => void }).unref?.()
+  // Роль проверяется внутри handleMessage: мастер входящие состояния игнорирует.
+  channel.onmessage = (event: MessageEvent) => {
+    if (typeof event.data === "string") handleMessage(event.data)
+  }
+  localChannel = channel
+}
+
+function closeLocalChannel() {
+  if (!localChannel) return
+  localChannel.onmessage = null
+  localChannel.close()
+  localChannel = null
 }
 
 function connect() {
@@ -243,6 +277,18 @@ function scheduleReconnect() {
   }, delay + delay * RETRY_JITTER * Math.random())
 }
 
+/**
+ * Применяет состояние на `/screen`. Один снапшот приходит двумя транспортами
+ * (сокет и локальный канал): первый побеждает, дубль отбрасываем — иначе экран
+ * перерисовывал бы всю сцену дважды на каждый клик Мастера.
+ */
+function applyRemoteSnapshot(raw: string, payload: SyncedEpisode) {
+  if (raw === lastAppliedSnapshot) return
+  lastAppliedSnapshot = raw
+  screenHasState = true
+  useEpisodeStore.getState().applyRemoteState(payload)
+}
+
 function handleMessage(raw: string) {
   let message: SyncMessage
   try {
@@ -259,8 +305,7 @@ function handleMessage(raw: string) {
 
   if (role === "screen") {
     if (message.type === "state") {
-      screenHasState = true
-      useEpisodeStore.getState().applyRemoteState(message.payload)
+      applyRemoteSnapshot(raw, message.payload)
       setStatus("live")
       return
     }
@@ -270,10 +315,6 @@ function handleMessage(raw: string) {
   }
 
   if (message.type === "request-state") {
-    if (scheduled !== null) {
-      clearTimeout(scheduled)
-      scheduled = null
-    }
     flushSnapshot(true)
     return
   }
@@ -314,10 +355,14 @@ export function initEpisodeSync(nextRole: SyncRole): () => void {
   hadConnection = false
   screenHasState = false
   lastSnapshot = null
+  lastAppliedSnapshot = null
   setStatus("connecting")
+  openLocalChannel()
 
   if (nextRole === "master") {
-    unsubscribeStore = useEpisodeStore.subscribe(scheduleSnapshot)
+    // Подписка на стор без debounce: снапшот уходит в том же тике, где Мастер
+    // изменил сцену, персонажа или карту. Ждать «следующего кадра» нечего.
+    unsubscribeStore = useEpisodeStore.subscribe(() => flushSnapshot())
   }
 
   connect()
@@ -327,10 +372,6 @@ export function initEpisodeSync(nextRole: SyncRole): () => void {
 export function teardownEpisodeSync() {
   stopped = true
 
-  if (scheduled !== null) {
-    clearTimeout(scheduled)
-    scheduled = null
-  }
   if (retryTimer !== null) {
     clearTimeout(retryTimer)
     retryTimer = null
@@ -338,6 +379,8 @@ export function teardownEpisodeSync() {
 
   unsubscribeStore?.()
   unsubscribeStore = null
+  closeLocalChannel()
+  lastAppliedSnapshot = null
 
   const current = socket
   socket = null

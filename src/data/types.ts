@@ -13,10 +13,24 @@ export type ActGroup = string
 /** Категория токена/персонажа: 4 колонки в панели токенов. */
 export type TokenCategory = "hero" | "npc" | "enemy" | "item"
 
+/**
+ * Вариант внешнего вида сцены: «Обычное», «Ночь», «Пожар», «Разрушенная».
+ * У каждого варианта своя картинка (или видео) и свой флаг карты местности —
+ * состояние может превращать сцену в поле боя и обратно.
+ */
+export type BackgroundState = {
+  id: string
+  name: string
+  /** Путь к картинке или видео состояния */
+  src: string
+  /** Состояние-карта местности: над фоном рисуется сетка */
+  isBattlemap?: boolean
+}
+
 export type Background = {
   id: string
   title: string
-  /** Путь к картинке или видео сцены (1920×880). Пустая строка — иконочный плейсхолдер. */
+  /** Путь к картинке или видео сцены (кадр 4:3, виртуальные 1440×1080). Пустая строка — иконочный плейсхолдер. */
   src: string
   actGroup: ActGroup
   isBattlemap: boolean
@@ -26,6 +40,28 @@ export type Background = {
    * просто не знают. Рубильник живёт в плеере Viewport Мастера.
    */
   isLoop?: boolean
+  /**
+   * Варианты внешнего вида сцены. Пусто/нет — значит у сцены только «Обычное»:
+   * им считается базовый `src` (файлы выпуска старого формата состояний не знают).
+   */
+  states?: BackgroundState[]
+  /** Активное состояние сцены: по нему рисуется эфир (см. getBackgroundActiveState) */
+  activeStateId?: string
+}
+
+/**
+ * Вариант внешнего вида персонажа: «Обычное», «Раненый», «В ярости» и любые
+ * другие, которые мастер добавит сам. У каждого варианта свои картинки — токен на
+ * карте и иллюстрация для сцены, поэтому смена состояния мгновенно меняет и то,
+ * и другое.
+ */
+export type CharacterState = {
+  id: string
+  name: string
+  /** Картинка круглого токена */
+  avatarSrc: string
+  /** Иллюстрация для сцены (полный рост) */
+  fullBodyPngSrc: string
 }
 
 export type Character = {
@@ -36,6 +72,14 @@ export type Character = {
   category: TokenCategory
   avatarSrc: string
   fullBodyPngSrc: string
+  /**
+   * Варианты внешнего вида. Пустой массив или отсутствие поля означает, что у
+   * персонажа только «Обычное» состояние: базовые `avatarSrc`/`fullBodyPngSrc`
+   * и есть оно (см. `getCharacterActiveState`).
+   */
+  states?: CharacterState[]
+  /** Активный вариант внешнего вида; нет — «Обычное» */
+  activeStateId?: string
   hp?: { current: number; max: number }
 }
 
@@ -98,8 +142,7 @@ export type GroupTrack = {
 /** Треки групп: ключ — имя группы сцен, значение — трек или `null`. */
 export type GroupTracks = Record<string, GroupTrack | null>
 
-/** Фазы двухфазной анимации выхода/выхода персонажа. */
-export type StagePhase = "idle" | "leaving" | "entering"
+/** Тип фаз анимации сцены больше не нужен: выезд и уход считает SceneStage. */
 
 export type RollDie = {
   sides: DieSides
@@ -151,10 +194,11 @@ export type SyncedEpisode = {
   activeBackgroundId: string | null
   /** Предыдущая сцена — нужна для fade-перехода на /screen */
   previousBackgroundId: string | null
-  activeCharacterId: string | null
-  stagePhase: StagePhase
-  stageFromCharacterId: string | null
-  stageToCharacterId: string | null
+  /**
+   * Кто стоит на сцене — до четырёх персонажей/предметов сразу. Порядок задаёт
+   * раскладку по горизонтали (см. characterStagePositions).
+   */
+  activeCharacterIds: string[]
   mapTokens: MapToken[]
   activeMapId: string | null
   lastRoll: DiceRollResult | null
@@ -196,6 +240,9 @@ export type EpisodeFile = {
   sceneNotes?: SceneNotes
   /** Сцена в эфире; в пустом выпуске поля нет — тогда её просто нет */
   activeBackgroundId?: string | null
+  /** Кто стоит на сцене: до четырёх фигур, порядок задаёт их раскладку */
+  activeCharacterIds?: string[]
+  /** Формат до перехода на несколько персонажей: один герой на сцене */
   activeCharacterId?: string | null
   activeMapId?: string | null
 }

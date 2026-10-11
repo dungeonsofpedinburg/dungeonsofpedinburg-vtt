@@ -23,9 +23,43 @@ import { postRollResult } from "@/store/episodeSync"
 import { useEpisodeStore } from "@/store/useEpisodeStore"
 import { cn } from "@/lib/utils"
 
-/** Контейнер кубиков: лежит внутри SceneStage — значит, виден и в OBS. */
+/*
+ * --- Стабильность кубиков в долгой сессии (аудит) ---
+ *
+ * 1. Инстанс один на страницу (`engine`): канвас и мир физики не пересоздаются на
+ *    каждый рендер, StrictMode и HMR им не мешают.
+ * 2. Кубики живут внутри виртуальной сцены 1440×1080: `#dice-box-overlay` —
+ *    потомок SceneStage, поэтому границы броска масштабируются вместе со сценой
+ *    (ObsScreen вписывает кадр через `transform: scale`) и кубики не улетают за
+ *    видимую область даже на 720p.
+ * 3. Память: плашка гаснет — вызывается `clear()` (кубики и тела Ammo), а
+ *    `resetDiceEngine` убирает мёртвый канвас и его слушатель контекста из DOM.
+ * 4. Живучесть: `webglcontextlost` ведёт к пересборке через `acquireDiceEngine`,
+ *    зависшая физика отсекается сторожем `DICE_ROLL_WATCHDOG_MS`, броски идут
+ *    строго по одному (`rollChainRef`) — очередь не встаёт.
+ * 5. Накоплений нет: `resizeWorld()` зовётся только при реальном изменении
+ *    размера (библиотека добавляет на каждый вызов свой слушатель `window.resize`),
+ *    а замер подложки идёт по лейаутному размеру, поэтому масштаб окна не
+ *    «пересчитывает» мир физики.
+ */
+
+/**
+ * Контейнер кубиков: лежит внутри SceneStage — значит, виден и в OBS, и
+ * масштабируется вместе со сценой (ObsScreen вписывает виртуальные 1440×1080 в
+ * окно через `transform: scale`). Границы броска совпадают с границами подложки
+ * в пикселях канваса, поэтому кубики не улетают за видимую область даже на 720p.
+ */
 const DICE_BOX_ID = "dice-box-overlay"
 const DICE_BOX_SELECTOR = `#${DICE_BOX_ID}`
+
+/**
+ * Отступ подложки от краёв сцены в пикселях ВИРТУАЛЬНОЙ сцены 1440×1080.
+ * Здесь был `5vw`, но `vw` считается от окна, а не от виртуальной сцены: на
+ * другом разрешении подложка «переезжала» и кубики теряли свои границы.
+ * 96 px дают подложку 1248×888 — тот же прямоугольник, на котором калибровался
+ * размер кубиков (`DICE_REFERENCE_GEOMETRY`).
+ */
+const PLATE_INSET_PX = 96
 
 /** Стартовый размер: средний пул. Первый бросок всё равно выставит свой. */
 const INITIAL_DICE_SCALE = diceScaleForCount(3)
@@ -41,11 +75,22 @@ const CONTEXT_LOST_EVENT = "webglcontextlost"
  */
 const RESIZE_SETTLE_MS = 250
 
-/** Прямоугольник подложки: канвас бросается ровно в тех же пикселях. */
+/**
+ * Прямоугольник подложки: канвас бросается ровно в тех же пикселях.
+ *
+ * Замер идёт по ЛЕЙАУТНОМУ размеру (`offsetWidth/offsetHeight`), а не по
+ * `getBoundingClientRect()`: на /screen сцена вписана в окно через
+ * `transform: scale`, и прямоугольник из `getBoundingClientRect()` оказался бы
+ * домножен на масштаб. Тогда размер кубиков и мир физики считались бы от
+ * «уменьшенного» канваса, а на экране кубики стали бы меньше задуманного.
+ * Виртуальные пиксели (1440×1080) одинаковы на любом мониторе — берём их.
+ */
 function measureGeometry(container: HTMLElement | null): DiceGeometry {
-  const rect = container?.getBoundingClientRect()
-  if (!rect || rect.width < 1 || rect.height < 1) return DICE_REFERENCE_GEOMETRY
-  return { plateWidthPx: rect.width, plateHeightPx: rect.height }
+  if (!container) return DICE_REFERENCE_GEOMETRY
+  const plateWidthPx = container.offsetWidth
+  const plateHeightPx = container.offsetHeight
+  if (plateWidthPx < 1 || plateHeightPx < 1) return DICE_REFERENCE_GEOMETRY
+  return { plateWidthPx, plateHeightPx }
 }
 
 /**
@@ -411,31 +456,40 @@ export function DiceOverlay() {
       <div
         aria-hidden
         className={cn(
-          "absolute inset-[5vw] rounded-3xl border-2 border-zinc-700/60 bg-zinc-900/65 backdrop-blur-md transition-opacity duration-500",
+          "absolute rounded-3xl border-2 border-zinc-700/60 bg-zinc-900/65 backdrop-blur-md transition-opacity duration-500",
           showPlate ? "opacity-100" : "opacity-0"
         )}
+        style={{ inset: PLATE_INSET_PX }}
       />
       {/* Кубики бросаются внутри подложки: канвас — тот же прямоугольник. */}
       <div
         ref={containerRef}
         id={DICE_BOX_ID}
-        className="absolute inset-[5vw] [&>canvas]:size-full"
+        className="absolute [&>canvas]:size-full"
+        style={{ inset: PLATE_INSET_PX }}
       />
       {/*
-        Итог броска поверх нижних 20% подложки. Полоса вырезана по её ширине
-        (inset-x-[5vw]) и прижата к низу: у подложки по 5vw отступа сверху и
-        снизу, поэтому 20% её высоты — это 20% × (100% − 10vw), то есть высота
-        `calc(20% - 2vw)` (177.6 px на канвасе 1920). Градиент снизу вверх: у
-        нижней кромки чёрный, выше — прозрачный, поэтому строка читается на
-        любой картинке. Стоит ПОСЛЕ канваса: DOM-порядок кладёт её поверх кубиков.
-        Кегль приходит из @/lib/dice в rem и ужимается, если строка шире подложки.
+        Итог броска поверх нижних 20% подложки. Полоса вырезана по её ширине и
+        прижата к низу: у подложки по PLATE_INSET_PX отступа сверху и снизу,
+        поэтому 20% её высоты — это 20% высоты сцены минус пятая часть этих
+        отступов (`20% - 2 × inset / 5` = 177.6 px на канвасе 1440×1080).
+        Градиент снизу вверх: у нижней кромки чёрный, выше — прозрачный, поэтому
+        строка читается на любой картинке. Стоит ПОСЛЕ канваса: DOM-порядок
+        кладёт её поверх кубиков. Кегль приходит из @/lib/dice в rem и ужимается,
+        если строка шире подложки.
       */}
       <div
         className={cn(
-          "pointer-events-none absolute inset-x-[5vw] bottom-[5vw] flex h-[calc(20%_-_2vw)] items-center justify-center",
+          "pointer-events-none absolute flex items-center justify-center",
           "rounded-b-3xl bg-linear-to-t from-black to-black/0 transition-opacity duration-300",
           lastRoll ? "opacity-100" : "opacity-0"
         )}
+        style={{
+          left: PLATE_INSET_PX,
+          right: PLATE_INSET_PX,
+          bottom: PLATE_INSET_PX,
+          height: `calc(20% - ${(PLATE_INSET_PX * 2) / 5}px)`,
+        }}
       >
         {lastRoll ? (
           <span

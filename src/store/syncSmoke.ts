@@ -12,6 +12,58 @@ import {
 } from "@/data/content"
 import { resolveCellFromPoint } from "@/hooks/useGridDrop"
 import {
+  DEFAULT_BACKGROUND_STATE_ID,
+  DEFAULT_BACKGROUND_STATE_NAME,
+  backgroundStateSrc,
+  backgroundStates,
+  getBackgroundActiveState,
+  hasCustomBackgroundStates,
+  isBackgroundBattlemap,
+} from "@/lib/background"
+import { CROSSFADE_MS } from "@/components/master-panel/CrossfadeImage"
+import {
+  MAX_STAGE_CHARACTERS,
+  STAGE_HEIGHT_PX,
+  STAGE_SLIDE_MS,
+  STAGE_WIDTH_PX,
+  characterStagePosition,
+  characterStagePositions,
+  stageScale,
+} from "@/lib/stage"
+import {
+  cellCenterFraction,
+  cellDistance,
+  clusterTargetCells,
+  isPointInsideRect,
+  normalizeRect,
+} from "@/lib/token-cluster"
+import {
+  TOKEN_JUMP_DURATION,
+  TOKEN_JUMP_KEYFRAMES,
+  TOKEN_JUMP_TIMES,
+  TOKEN_MOVE_DURATION,
+} from "@/lib/token-motion"
+/*
+ * Исходники для проверок, которые нельзя выразить через стор (стили `/screen`,
+ * разметка жестов и слоёв анимации). `?raw` отдаёт содержимое файла строкой —
+ * смоук грузится через Vite SSR, поэтому отдельный доступ к файловой системе не
+ * нужен, а проверки читают ровно то, что собирается в бандл.
+ */
+import indexCssSource from "@/index.css?raw"
+import obsScreenSource from "@/pages/ObsScreen.tsx?raw"
+import sceneStageSource from "@/components/master-panel/SceneStage.tsx?raw"
+import battleMapGridSource from "@/components/master-panel/BattleMapGrid.tsx?raw"
+import battleMapTabSource from "@/components/master-panel/tabs/BattleMapTab.tsx?raw"
+import appSource from "@/App.tsx?raw"
+import backgroundLibrarySource from "@/components/master-panel/BackgroundLibrary.tsx?raw"
+import episodeStoreSource from "@/store/useEpisodeStore.ts?raw"
+import sceneViewportSource from "@/components/master-panel/SceneViewport.tsx?raw"
+import diceOverlaySource from "@/components/dice/DiceOverlay.tsx?raw"
+import crossfadeImageSource from "@/components/master-panel/CrossfadeImage.tsx?raw"
+import globalAudioSidebarSource from "@/components/master-panel/GlobalAudioSidebar.tsx?raw"
+import masterPanelSource from "@/pages/MasterPanel.tsx?raw"
+import episodeSyncSource from "@/store/episodeSync.ts?raw"
+import {
   resolveGroupTrackAction,
   shouldResumeGroupTrack,
 } from "@/lib/group-track"
@@ -31,6 +83,14 @@ import {
 } from "@/lib/audio-crossfade"
 import { fileNameWithoutExtension } from "@/lib/utils"
 import { readMp3Tags } from "@/lib/audio-file"
+import {
+  DEFAULT_CHARACTER_STATE_ID,
+  DEFAULT_CHARACTER_STATE_NAME,
+  characterAvatarSrc,
+  characterFullBodySrc,
+  characterStates,
+  getCharacterActiveState,
+} from "@/lib/character"
 import type { EpisodeFile, SyncedEpisode } from "@/data/types"
 import {
   DICE_DEFAULT_RAW_MASS,
@@ -52,6 +112,7 @@ import {
   buildDiceNotation,
   diceScaleForCount,
   diceSum,
+  diceWidthPx,
   diceThrowSpeedFactor,
   estimateDiceRoll,
   formatRollBreakdown,
@@ -139,6 +200,10 @@ const backgroundOrder = () =>
     .backgrounds.map((item) => item.id)
     .join(",")
 
+/** Клетка в виде строки — для проверок уникальности позиций. */
+const cellKey = (cell: { cellX: number; cellY: number }) =>
+  `${cell.cellX},${cell.cellY}`
+
 // --- Чистый старт: приложение обязано начинаться с пустого выпуска ---
 // Демо-данных в стартовом наборе нет: ни сцен, ни персонажей, ни треков.
 check(
@@ -150,7 +215,7 @@ check(
     store().mapTokens.length === 0 &&
     Object.keys(store().groupNotes).length === 0 &&
     store().activeBackgroundId === null &&
-    store().activeCharacterId === null &&
+    store().activeCharacterIds.length === 0 &&
     store().activeMapId === null,
   `сцен: ${store().backgrounds.length}, персонажей: ${store().characters.length}, треков: ${store().tracks.length}`
 )
@@ -381,45 +446,59 @@ check(
   `сумма: ${roll?.sum}`
 )
 
-// --- Двухфазная смена персонажа (п.6) ---
+// --- Сцена: до четырёх персонажей сразу (раскладка, лимит, снятие) ---
 store().toggleCharacterOnStage("char-ingrid")
 check(
-  "первый персонаж сразу выезжает (entering)",
-  store().stagePhase === "entering" &&
-    store().activeCharacterId === "char-ingrid",
-  store().stagePhase
+  "первый клик выводит персонажа на сцену",
+  store().activeCharacterIds.join(",") === "char-ingrid",
+  store().activeCharacterIds.join(", ")
 )
-await wait(420)
-check("после выезда фаза возвращается в idle", store().stagePhase === "idle")
-
+store().toggleCharacterOnStage("char-marcus")
+store().toggleCharacterOnStage("char-selena")
+check(
+  "двое и трое на сцене: порядок выхода сохраняется",
+  store().activeCharacterIds.join(",") === "char-ingrid,char-marcus,char-selena",
+  store().activeCharacterIds.join(", ")
+)
+store().toggleCharacterOnStage("char-anselm")
+store().toggleCharacterOnStage("char-hobb")
+check(
+  "пятый персонаж не пускается: на сцене максимум четыре",
+  store().activeCharacterIds.length === MAX_STAGE_CHARACTERS &&
+    !store().activeCharacterIds.includes("char-hobb"),
+  `на сцене: ${store().activeCharacterIds.length}`
+)
 store().toggleCharacterOnStage("char-marcus")
 check(
-  "смена персонажа начинается с фазы leaving",
-  store().stagePhase === "leaving" &&
-    store().stageFromCharacterId === "char-ingrid" &&
-    store().stageToCharacterId === "char-marcus"
+  "повторный клик убирает персонажа со сцены, остальные остаются",
+  !store().activeCharacterIds.includes("char-marcus") &&
+    store().activeCharacterIds.length === 3,
+  store().activeCharacterIds.join(", ")
 )
-await wait(420)
+store().clearStage()
 check(
-  "через 350 мс начинается выезд нового персонажа",
-  store().stagePhase === "entering",
-  store().stagePhase
-)
-await wait(420)
-check(
-  "двухфазная смена завершается в idle",
-  store().stagePhase === "idle" && store().activeCharacterId === "char-marcus"
+  "клик по превью очищает сцену целиком",
+  store().activeCharacterIds.length === 0
 )
 
-store().toggleCharacterOnStage("char-marcus")
+// Раскладка фигур: позиции в процентах ширины сцены — по ТЗ.
 check(
-  "скрытие персонажа идёт через leaving",
-  store().stagePhase === "leaving" && store().stageToCharacterId === null
+  "раскладка 1–4 персонажей: центр и равные отступы (50 / 35-65 / 25-50-75 / 18-38-62-82)",
+  characterStagePositions(1).join(",") === "50" &&
+    characterStagePositions(2).join(",") === "35,65" &&
+    characterStagePositions(3).join(",") === "25,50,75" &&
+    characterStagePositions(4).join(",") === "18,38,62,82",
+  characterStagePositions(4).join(", ")
 )
-await wait(800)
 check(
-  "после скрытия сцена пуста",
-  store().stagePhase === "idle" && store().activeCharacterId === null
+  "позиция фигуры берётся по её индексу в списке сцены",
+  characterStagePosition(0, 1) === 50 &&
+    characterStagePosition(1, 4) === 38 &&
+    characterStagePosition(3, 4) === 82
+)
+check(
+  "выезд фигуры длится 350 мс (совпадает с анимацией SceneStage)",
+  STAGE_SLIDE_MS === 350 && MAX_STAGE_CHARACTERS === 4
 )
 
 // --- Снапшот для /screen ---
@@ -435,9 +514,9 @@ check(
   `сообщений: ${stateMessages.length}`
 )
 check(
-  "снапшот содержит фазу сцены",
-  payload?.stagePhase === "idle",
-  String(payload?.stagePhase)
+  "снапшот содержит список персонажей на сцене",
+  Array.isArray(payload?.activeCharacterIds),
+  String(payload?.activeCharacterIds)
 )
 check(
   "снапшот содержит флаг ожидания броска для подложки /screen",
@@ -478,10 +557,7 @@ const remoteState: SyncedEpisode = {
   characters: store().characters,
   activeBackgroundId: "bg-town-hall",
   previousBackgroundId: "bg-harbor",
-  activeCharacterId: "char-selena",
-  stagePhase: "entering",
-  stageFromCharacterId: "char-ingrid",
-  stageToCharacterId: "char-selena",
+  activeCharacterIds: ["char-selena", "char-ingrid"],
   mapTokens: [
     {
       id: "token-selena",
@@ -512,8 +588,7 @@ check(
     return (
       follower.activeBackgroundId === "bg-town-hall" &&
       follower.previousBackgroundId === "bg-harbor" &&
-      follower.activeCharacterId === "char-selena" &&
-      follower.stagePhase === "entering" &&
+      follower.activeCharacterIds.join(",") === "char-selena,char-ingrid" &&
       follower.lastRoll === null &&
       follower.lastRollEvent?.id === 7 &&
       follower.isRollPending === true &&
@@ -524,7 +599,7 @@ check(
       follower.videoPlayback.seekId === 1234
     )
   }),
-  `${store().activeBackgroundId} / ${store().stagePhase}`
+  `${store().activeBackgroundId} / ${store().activeCharacterIds.join(", ")}`
 )
 check(
   "экран проходит фазы connecting → waiting → live",
@@ -549,8 +624,7 @@ check(
   store().backgrounds.length === seedBackgrounds &&
     store().tracks.length === seedTracks &&
     store().dicePool.length === 0 &&
-    store().activeCharacterId === null &&
-    store().stagePhase === "idle",
+    store().activeCharacterIds.length === 0,
   `фонов: ${store().backgrounds.length}, треков: ${store().tracks.length}`
 )
 
@@ -612,14 +686,13 @@ check(
 )
 
 store().toggleCharacterOnStage(createdId)
-await wait(760)
 store().addToken(createdId, 2, 2)
 store().removeCharacter(createdId)
 check(
   "removeCharacter чистит персонажа, токен и сцену",
   !store().characters.some((item) => item.id === createdId) &&
     !store().mapTokens.some((token) => token.characterId === createdId) &&
-    store().activeCharacterId === null
+    !store().activeCharacterIds.includes(createdId)
 )
 
 check(
@@ -709,8 +782,9 @@ check(
 store().updateBackgroundImage("bg-harbor", "data:image/webp;base64,SCENE")
 check(
   "updateBackgroundImage подставляет картинку сцены",
-  store().backgrounds.find((item) => item.id === "bg-harbor")?.src ===
-    "data:image/webp;base64,SCENE"
+  backgroundStateSrc(
+    store().backgrounds.find((item) => item.id === "bg-harbor")!
+  ) === "data:image/webp;base64,SCENE"
 )
 
 const legacyFile = JSON.stringify({
@@ -1504,7 +1578,7 @@ check(
   String(gridCellPercent.width)
 )
 check(
-  "ровных клеток 14 × 11",
+  "ровных клеток 14 × 11 (кадр 4:3, 1440×1080)",
   GRID_COLUMNS === 14 && GRID_ROWS === 11,
   `${GRID_COLUMNS} × ${GRID_ROWS}`
 )
@@ -1533,6 +1607,7 @@ check(
 )
 
 // Попадание точки в ровную клетку и отказ в краевых «неровных» полосах.
+// Поле — кадр сцены: 1440×1080 (4:3), как во Viewport и в эфире.
 const field = { left: 0, top: 0, width: 1440, height: 1080 }
 const cellSize = GRID_CELL_RATIO * field.width
 const offsetXPx = (gridOffsetPercent.x / 100) * field.width
@@ -2840,7 +2915,7 @@ check(
     ) &&
     store().mapTokens.some((token) => token.id === survivorToken) &&
     store().mapTokens.length === tokensBefore - doomedTokens &&
-    store().activeCharacterId === null,
+    store().activeCharacterIds.length === 0,
   `токенов: ${store().mapTokens.length}, удалено: ${doomedTokens}`
 )
 
@@ -3224,6 +3299,871 @@ check(
     !shouldResumeGroupTrack({ suspended: true, manualPlaying: true }) &&
     !shouldResumeGroupTrack({ suspended: false, manualPlaying: false }),
   JSON.stringify(resumeAction)
+)
+
+// --- Фаза 28: состояния персонажей (варианты внешнего вида) ---
+resetSmokeEpisode()
+const stateHeroId = store().characters[0].id
+const heroState = () =>
+  store().characters.find((item) => item.id === stateHeroId)!
+check(
+  "персонаж без состояний считается «Обычным»",
+  getCharacterActiveState(store().characters[0]).id ===
+    DEFAULT_CHARACTER_STATE_ID &&
+    getCharacterActiveState(store().characters[0]).name ===
+      DEFAULT_CHARACTER_STATE_NAME &&
+    characterStates(store().characters[0]).length === 1 &&
+    characterAvatarSrc(store().characters[0]) ===
+      store().characters[0].avatarSrc &&
+    characterFullBodySrc(store().characters[0]) ===
+      store().characters[0].fullBodyPngSrc
+)
+const woundedStateId = store().addCharacterState(stateHeroId, {
+  name: "Раненый",
+  avatarSrc: "data:image/png;base64,AA",
+  fullBodyPngSrc: "data:image/png;base64,BB",
+})
+check(
+  "новое состояние сразу активно, «Обычное» остаётся на месте",
+  getCharacterActiveState(heroState()).id === woundedStateId &&
+    characterStates(heroState())
+      .map((state) => state.name)
+      .join(",") === "Обычное,Раненый" &&
+    characterAvatarSrc(heroState()) === "data:image/png;base64,AA" &&
+    characterFullBodySrc(heroState()) === "data:image/png;base64,BB"
+)
+store().setActiveCharacterState(stateHeroId, DEFAULT_CHARACTER_STATE_ID)
+check(
+  "переключение на «Обычное» возвращает базовые картинки",
+  getCharacterActiveState(heroState()).id === DEFAULT_CHARACTER_STATE_ID &&
+    characterAvatarSrc(heroState()) === heroState().avatarSrc
+)
+store().setActiveCharacterState(stateHeroId, woundedStateId)
+store().updateCharacterImage(stateHeroId, {
+  avatarSrc: "data:image/png;base64,CC",
+})
+check(
+  "замена картинки правит активное состояние, а не «Обычное»",
+  characterAvatarSrc(heroState()) === "data:image/png;base64,CC" &&
+    heroState().avatarSrc === "/placeholders/character-1.svg"
+)
+store().removeCharacterState(stateHeroId, DEFAULT_CHARACTER_STATE_ID)
+check(
+  "«Обычное» состояние удалить нельзя",
+  characterStates(heroState()).some(
+    (state) => state.id === DEFAULT_CHARACTER_STATE_ID
+  )
+)
+store().removeCharacterState(stateHeroId, woundedStateId)
+check(
+  "удаление активного состояния возвращает персонажа к «Обычному»",
+  getCharacterActiveState(heroState()).id === DEFAULT_CHARACTER_STATE_ID &&
+    !characterStates(heroState()).some((state) => state.id === woundedStateId)
+)
+
+// Состояния уезжают в файл выпуска, а их картинки — в список ассетов.
+resetSmokeEpisode()
+const statesCharacterId = store().characters[0].id
+const exportedStateId = store().addCharacterState(statesCharacterId, {
+  name: "В ярости",
+  avatarSrc: "data:image/png;base64,AA",
+  fullBodyPngSrc: "data:image/png;base64,BB",
+})
+const statesFile = buildEpisodeFile()
+const exportedStateCharacter = statesFile.characters[0]
+check(
+  "файл выпуска хранит состояния и активное состояние, но не Base64",
+  exportedStateCharacter.states?.length === 2 &&
+    exportedStateCharacter.states[1].name === "В ярости" &&
+    exportedStateCharacter.states[1].avatarSrc === "" &&
+    exportedStateCharacter.activeStateId === exportedStateId &&
+    !JSON.stringify(statesFile).includes("data:image")
+)
+check(
+  "картинки состояний попадают в список ассетов выпуска",
+  episodeAssetFields(statesFile).some(
+    (field) =>
+      field.field === "characters[0].states[1].fullBodyPngSrc"
+  )
+)
+
+// Импорт: состояния читаются, а их пути приводятся к виду `/assets/...`.
+store().importEpisode(
+  parseEpisodeFile(
+    JSON.stringify({
+      campaign: "Состояния",
+      backgrounds: [
+        {
+          id: "bg-state",
+          title: "Сцена",
+          src: "",
+          actGroup: "Завязка",
+          isBattlemap: false,
+        },
+      ],
+      characters: [
+        {
+          id: "char-state",
+          name: "Алхимик",
+          role: "NPC",
+          initials: "А",
+          category: "npc",
+          avatarSrc: "/placeholders/character-1.svg",
+          fullBodyPngSrc: "/placeholders/character-1.svg",
+          states: [
+            {
+              id: "default",
+              name: "Обычное",
+              avatarSrc: "/placeholders/character-1.svg",
+              fullBodyPngSrc: "/placeholders/character-1.svg",
+            },
+            {
+              id: "wounded",
+              name: "Раненый",
+              avatarSrc: "D:\\proj\\assets\\characters\\wounded.png",
+              fullBodyPngSrc: "/Users/me/proj/assets/characters/раненый.png",
+            },
+          ],
+          activeStateId: "wounded",
+        },
+      ],
+      tracks: [],
+      mapTokens: [],
+      sceneNotes: {},
+    })
+  )
+)
+const importedStateCharacter = store().characters.find(
+  (item) => item.id === "char-state"
+)!
+check(
+  "импорт читает состояния и нормализует их пути",
+  importedStateCharacter.activeStateId === "wounded" &&
+    importedStateCharacter.states?.[1].avatarSrc ===
+      "/assets/characters/wounded.png" &&
+    importedStateCharacter.states?.[1].fullBodyPngSrc ===
+      "/assets/characters/раненый.png" &&
+    characterFullBodySrc(importedStateCharacter) ===
+      "/assets/characters/раненый.png",
+  characterFullBodySrc(importedStateCharacter)
+)
+
+// --- Фаза 29: выделение группы, кластеризация и прыжок по дуге ---
+const clusterTarget = { cellX: 7, cellY: 3 }
+const occupiedNearTarget = { cellX: 8, cellY: 3 }
+const cluster = clusterTargetCells({
+  target: clusterTarget,
+  count: 4,
+  occupied: [occupiedNearTarget],
+  columns: GRID_COLUMNS,
+  rows: GRID_ROWS,
+})
+check(
+  "кластеризация: первая клетка — цель, клетки разные, занятая пропущена",
+  cluster.length === 4 &&
+    cellKey(cluster[0]) === cellKey(clusterTarget) &&
+    new Set(cluster.map(cellKey)).size === 4 &&
+    !cluster.some((cell) => cellKey(cell) === cellKey(occupiedNearTarget)),
+  cluster.map(cellKey).join(" · ")
+)
+const clusterDistances = cluster.map((cell) =>
+  cellDistance(cell, clusterTarget)
+)
+check(
+  "кластеризация: клетки идут по возрастанию расстояния от цели",
+  clusterDistances.every(
+    (distance, index) => index === 0 || distance >= clusterDistances[index - 1]
+  ),
+  clusterDistances.map((distance) => distance.toFixed(2)).join(" ≤ ")
+)
+const clusterAroundOccupied = clusterTargetCells({
+  target: { cellX: 0, cellY: 0 },
+  count: 3,
+  occupied: [{ cellX: 0, cellY: 0 }],
+  columns: GRID_COLUMNS,
+  rows: GRID_ROWS,
+})
+check(
+  "кластеризация: занятую цель пропускаем — группа встаёт вокруг",
+  clusterAroundOccupied.length === 3 &&
+    !clusterAroundOccupied.some((cell) => cell.cellX === 0 && cell.cellY === 0),
+  clusterAroundOccupied.map(cellKey).join(" · ")
+)
+check(
+  "кластеризация: свободных клеток меньше запроса — отдаём сколько есть",
+  clusterTargetCells({
+    target: clusterTarget,
+    count: GRID_COLUMNS * GRID_ROWS + 10,
+    occupied: [],
+    columns: GRID_COLUMNS,
+    rows: GRID_ROWS,
+  }).length === GRID_COLUMNS * GRID_ROWS
+)
+
+// Рамка выделения: центры фишек считаются в долях поля, рамка нормализуется.
+const firstCellCenter = cellCenterFraction({ cellX: 0, cellY: 0 }, gridGeometry)
+check(
+  "центр клетки попадает внутрь своей клетки в долях поля",
+  firstCellCenter.x > gridGeometry.offsetX &&
+    firstCellCenter.x < gridGeometry.offsetX + gridGeometry.cellWidth &&
+    firstCellCenter.y > gridGeometry.offsetY &&
+    firstCellCenter.y < gridGeometry.offsetY + gridGeometry.cellHeight,
+  `${firstCellCenter.x.toFixed(3)} · ${firstCellCenter.y.toFixed(3)}`
+)
+const marqueeBox = normalizeRect({ x: 0.5, y: 0.6 }, { x: 0.2, y: 0.1 })
+check(
+  "рамка выделения нормализуется: левый и верхний края — минимум",
+  marqueeBox.left === 0.2 &&
+    marqueeBox.top === 0.1 &&
+    marqueeBox.right === 0.5 &&
+    marqueeBox.bottom === 0.6
+)
+const tinyBox = {
+  left: firstCellCenter.x - 0.01,
+  right: firstCellCenter.x + 0.01,
+  top: firstCellCenter.y - 0.01,
+  bottom: firstCellCenter.y + 0.01,
+}
+check(
+  "рамка выделения: центр внутри — попадание, центр за границей — нет",
+  isPointInsideRect(firstCellCenter, tinyBox) &&
+    !isPointInsideRect(
+      { x: firstCellCenter.x + 0.2, y: firstCellCenter.y },
+      tinyBox
+    )
+)
+
+// Групповое перемещение: одна запись состояния — один снапшот на /screen.
+resetSmokeEpisode()
+const groupMapId = store().backgrounds.find((item) => item.isBattlemap)?.id ?? ""
+const [groupHeroA, groupHeroB, groupHeroC, groupHeroD] = store().characters
+const groupMoveIds = [
+  store().addToken(groupHeroA.id, 0, 0, groupMapId),
+  store().addToken(groupHeroB.id, 1, 0, groupMapId),
+  store().addToken(groupHeroC.id, 2, 0, groupMapId),
+]
+const bystanderId = store().addToken(groupHeroD.id, 8, 3, groupMapId)
+const groupMoving = groupMoveIds.map(
+  (id) => store().mapTokens.find((token) => token.id === id)!
+)
+const groupCells = clusterTargetCells({
+  target: clusterTarget,
+  count: groupMoving.length,
+  occupied: [{ cellX: 8, cellY: 3 }],
+  columns: GRID_COLUMNS,
+  rows: GRID_ROWS,
+})
+let tokenWrites = 0
+const unsubscribeTokenWrites = useEpisodeStore.subscribe((state, previous) => {
+  if (state.mapTokens !== previous.mapTokens) tokenWrites += 1
+})
+store().moveMultipleTokens(
+  groupMoving.map((token, index) => ({
+    tokenId: token.id,
+    cellX: groupCells[index].cellX,
+    cellY: groupCells[index].cellY,
+  }))
+)
+unsubscribeTokenWrites()
+const movedGroup = groupMoveIds.map(
+  (id) => store().mapTokens.find((token) => token.id === id)!
+)
+check(
+  "групповое перемещение: все фишки уехали одним обновлением состояния",
+  tokenWrites === 1 &&
+    movedGroup.every((token, index) => cellKey(token) === cellKey(groupCells[index])) &&
+    movedGroup.some((token) => cellKey(token) === cellKey(clusterTarget)),
+  `записей состояния: ${tokenWrites}, клетки: ${movedGroup.map(cellKey).join(" · ")}`
+)
+const mapTokenCells = store()
+  .mapTokens.filter((token) => token.mapId === groupMapId)
+  .map(cellKey)
+check(
+  "групповое перемещение: в одну клетку никто не встал",
+  new Set(mapTokenCells).size === mapTokenCells.length,
+  mapTokenCells.join(" · ")
+)
+const bystander = store().mapTokens.find((token) => token.id === bystanderId)!
+check(
+  "групповое перемещение: токен вне выделения остался на месте",
+  cellKey(bystander) === "8,3" &&
+    !movedGroup.some((token) => cellKey(token) === "8,3")
+)
+
+// Кадры прыжка — общий контракт панели Мастера и проектора.
+check(
+  "прыжок по дуге: отрыв 32 px, рост 1.25 и длинная тень в пике",
+  TOKEN_JUMP_KEYFRAMES.y.join(",") === "0,-32,0" &&
+    TOKEN_JUMP_KEYFRAMES.scale.join(",") === "1,1.25,1" &&
+    TOKEN_JUMP_KEYFRAMES.filter.length === 3 &&
+    TOKEN_JUMP_KEYFRAMES.filter[1].includes("20px 25px"),
+  TOKEN_JUMP_KEYFRAMES.filter[1]
+)
+check(
+  "перелёт 0.45 s, прыжок дольше и с пиком на середине",
+  TOKEN_MOVE_DURATION === 0.45 &&
+    TOKEN_JUMP_DURATION > TOKEN_MOVE_DURATION &&
+    TOKEN_JUMP_TIMES.join(",") === "0,0.5,1"
+)
+check(
+  "фишки анимируются Framer Motion в два слоя: координаты + высота прыжка",
+  battleMapGridSource.includes('from "framer-motion"') &&
+    battleMapGridSource.includes("useAnimationControls") &&
+    battleMapGridSource.includes("TOKEN_MOVE_DURATION")
+)
+check(
+  "выделенные фишки подсвечены золотой обводкой",
+  battleMapGridSource.includes(
+    "ring-2 ring-amber-400 ring-offset-2 ring-offset-background"
+  )
+)
+check(
+  "рамка выделения — янтарный полупрозрачный бокс, жесты по фишкам отсекаются",
+  battleMapTabSource.includes("border-amber-400 bg-amber-400/10") &&
+    battleMapTabSource.includes('closest("[data-map-token]")') &&
+    battleMapGridSource.includes("data-map-token={token.id}") &&
+    battleMapTabSource.includes("toggleTokenSelection")
+)
+
+// --- Фаза 30: /screen — монолитно чёрные поля кадрирования ---
+check(
+  "/screen: html и body получают background-color #000000 (html.screen-root)",
+  /html\.screen-root,\s*html\.screen-root body \{\s*background-color:\s*#000000/.test(
+    indexCssSource
+  )
+)
+check(
+  "/screen: контейнер страницы чёрный на весь экран, прозрачных подложек нет",
+  obsScreenSource.includes(
+    "bg-black w-screen h-screen flex items-center justify-center overflow-hidden"
+  ) &&
+    obsScreenSource.includes('classList.add("screen-root", "screen-scale")') &&
+    !obsScreenSource.includes("bg-transparent")
+)
+check(
+  "/screen: сцена тоже чёрная, серая заглушка осталась только панели Мастера",
+  obsScreenSource.includes("shrink-0 bg-black") &&
+    sceneStageSource.includes(") : showHint ? (")
+)
+
+// --- Фаза 31: состояния сцен («Ночь», «Пожар») ---
+resetSmokeEpisode()
+const stateSceneId = store().backgrounds[0].id
+const stateScene = () =>
+  store().backgrounds.find((item) => item.id === stateSceneId)!
+const baseSceneSrc = stateScene().src
+check(
+  "сцена без states: базовый кадр считается «Обычным»",
+  backgroundStates(stateScene()).length === 1 &&
+    getBackgroundActiveState(stateScene()).id === DEFAULT_BACKGROUND_STATE_ID &&
+    getBackgroundActiveState(stateScene()).name ===
+      DEFAULT_BACKGROUND_STATE_NAME &&
+    backgroundStateSrc(stateScene()) === baseSceneSrc &&
+    !hasCustomBackgroundStates(stateScene()),
+  getBackgroundActiveState(stateScene()).name
+)
+const nightStateId = store().addBackgroundState(stateSceneId, {
+  name: "Ночь",
+  src: "data:image/png;base64,NIGHT",
+  isBattlemap: true,
+})
+check(
+  "новое состояние сцены материализует «Обычное» и сразу становится активным",
+  nightStateId.length > 0 &&
+    backgroundStates(stateScene())[0].id === DEFAULT_BACKGROUND_STATE_ID &&
+    getBackgroundActiveState(stateScene()).name === "Ночь" &&
+    backgroundStateSrc(stateScene()) === "data:image/png;base64,NIGHT" &&
+    hasCustomBackgroundStates(stateScene()) &&
+    // Состояние может превратить сцену в карту местности.
+    isBackgroundBattlemap(stateScene()) === true,
+  getBackgroundActiveState(stateScene()).name
+)
+check(
+  "«Обычное» хранит базовый кадр сцены, а не картинку состояния",
+  backgroundStates(stateScene())[0].src === baseSceneSrc
+)
+store().updateBackgroundImage(stateSceneId, "data:image/png;base64,NIGHT2")
+check(
+  "замена картинки сцены правит активное состояние, а не «Обычное»",
+  backgroundStateSrc(stateScene()) === "data:image/png;base64,NIGHT2" &&
+    backgroundStates(stateScene())[0].src === baseSceneSrc
+)
+store().setActiveBackgroundState(stateSceneId, nightStateId)
+store().removeBackgroundState(stateSceneId, nightStateId)
+check(
+  "удаление активного состояния возвращает сцену к «Обычному»",
+  getBackgroundActiveState(stateScene()).id === DEFAULT_BACKGROUND_STATE_ID &&
+    backgroundStateSrc(stateScene()) === baseSceneSrc &&
+    !hasCustomBackgroundStates(stateScene())
+)
+store().removeBackgroundState(stateSceneId, DEFAULT_BACKGROUND_STATE_ID)
+check(
+  "«Обычное» у сцены удалить нельзя",
+  backgroundStates(stateScene()).some(
+    (item) => item.id === DEFAULT_BACKGROUND_STATE_ID
+  )
+)
+
+// Состояния сцены уезжают в файл выпуска, а их картинки — в список ассетов.
+resetSmokeEpisode()
+const exportedSceneId = store().backgrounds[0].id
+store().addBackgroundState(exportedSceneId, {
+  name: "Пожар",
+  src: "data:image/png;base64,FIRE",
+})
+const sceneStatesFile = buildEpisodeFile()
+const exportedScene = sceneStatesFile.backgrounds[0]
+check(
+  "файл выпуска хранит состояния сцены и активное состояние, но не Base64",
+  exportedScene.states?.length === 2 &&
+    exportedScene.states[1].name === "Пожар" &&
+    exportedScene.states[1].src === "" &&
+    exportedScene.activeStateId ===
+      store().backgrounds[0].activeStateId &&
+    !JSON.stringify(sceneStatesFile).includes("data:image"),
+  `состояний: ${exportedScene.states?.length}`
+)
+check(
+  "картинки состояний сцены попадают в список ассетов выпуска",
+  episodeAssetFields(sceneStatesFile).some(
+    (field) => field.field === "backgrounds[0].states[1].src"
+  )
+)
+
+// Импорт: состояния сцены читаются, а их пути приводятся к виду `/assets/...`.
+store().importEpisode(
+  parseEpisodeFile(
+    JSON.stringify({
+      campaign: "Состояния сцен",
+      backgrounds: [
+        {
+          id: "bg-state",
+          title: "Порт",
+          src: "/placeholders/scene-1.jpg",
+          actGroup: "Завязка",
+          isBattlemap: false,
+          states: [
+            {
+              id: "default",
+              name: "Обычное",
+              src: "/placeholders/scene-1.jpg",
+            },
+            {
+              id: "night",
+              name: "Ночь",
+              src: "D:\\proj\\assets\\episodes\\test\\scenes\\night.png",
+              isBattlemap: true,
+            },
+          ],
+          activeStateId: "night",
+        },
+      ],
+      characters: [],
+      tracks: [],
+      mapTokens: [],
+      sceneNotes: {},
+    })
+  )
+)
+const importedStateScene = store().backgrounds.find(
+  (item) => item.id === "bg-state"
+)!
+check(
+  "импорт читает состояния сцены и нормализует их пути",
+  importedStateScene.activeStateId === "night" &&
+    importedStateScene.states?.[1].src ===
+      "/assets/episodes/test/scenes/night.png" &&
+    backgroundStateSrc(importedStateScene) ===
+      "/assets/episodes/test/scenes/night.png" &&
+    isBackgroundBattlemap(importedStateScene) === true,
+  backgroundStateSrc(importedStateScene)
+)
+
+// --- Фаза 32: кроссфейды смены состояния ---
+check(
+  "кроссфейд кадра длится 300–450 мс (без резкого перемигивания)",
+  CROSSFADE_MS >= 300 && CROSSFADE_MS <= 450,
+  `${CROSSFADE_MS} мс`
+)
+check(
+  "смена состояния сцены идёт через кроссфейд кадра, а не подмену src",
+  sceneStageSource.includes("backgroundStateSrc(background)") &&
+    sceneStageSource.includes("staleMedia") &&
+    sceneStageSource.includes("animate-out") &&
+    sceneStageSource.includes("CROSSFADE_MS")
+)
+check(
+  "смена состояния персонажа растворяет прежнюю позу",
+  sceneStageSource.includes("<CrossfadeImage") &&
+    sceneStageSource.includes("characterFullBodySrc(character)")
+)
+
+// --- Фаза 33: тосты Sonner сверху по центру ---
+check(
+  "тосты подключены в корне приложения: сверху по центру и с richColors",
+  appSource.includes('<Toaster position="top-center" richColors />')
+)
+check(
+  "лимит сцены сообщается тостом, а не строкой в панели",
+  episodeStoreSource.includes('toast.warning("Максимум 4 персонажа на сцене")')
+)
+check(
+  "панель сцен шлёт уведомления тостами и не пишет статусы в разметку",
+  backgroundLibrarySource.includes("toast.success") &&
+    backgroundLibrarySource.includes("toast.error") &&
+    !backgroundLibrarySource.includes("sceneNotice")
+)
+
+// --- Фаза 34: группу двигает только перетаскивание ---
+check(
+  "клик по карте снимает выделение, а не двигает группу",
+  battleMapTabSource.includes(
+    "Клик без протяжки снимает выделение со всех фишек"
+  ) &&
+    // Перемещение группы осталось только в обработчике дропа.
+    (battleMapTabSource.match(/moveSelectionTo\(/g) ?? []).length === 1
+)
+
+// --- Фаза 35: сцена 4:3 — letterbox /screen, размер фигур, карточки карт ---
+const scaledAt1378 = stageScale(1378, 720)
+check(
+  "сцена 4:3 вписывается целиком: 1378×720 → масштаб 0.6667, кадр 960×720",
+  Math.abs(scaledAt1378 - 720 / 1080) < 1e-9 &&
+    // отмасштабированный кадр входит и по ширине, и по высоте — головы не срезаются
+    1440 * scaledAt1378 <= 1378 + 1e-9 &&
+    1080 * scaledAt1378 <= 720 + 1e-9,
+  `${(1440 * scaledAt1378).toFixed(1)}×${(1080 * scaledAt1378).toFixed(1)}`
+)
+check(
+  "масштаб — минимум обеих сторон окна: 1 на 1440×1080, 2 на 4K, 0.6667 на 1280×720",
+  stageScale(1440, 1080) === 1 &&
+    stageScale(1920, 1080) === 1 &&
+    stageScale(3840, 2160) === 2 &&
+    Math.abs(stageScale(1280, 720) - 720 / 1080) < 1e-9,
+  `1280×720 → ${stageScale(1280, 720).toFixed(4)}, 4K → ${stageScale(3840, 2160)}`
+)
+check(
+  "виртуальная сцена — строго 4:3 (1440×1080), масштаб через transform",
+  STAGE_WIDTH_PX === 1440 &&
+    STAGE_HEIGHT_PX === 1080 &&
+    obsScreenSource.includes("from \"@/lib/stage\"") &&
+    obsScreenSource.includes("width: `${STAGE_WIDTH_PX}px`") &&
+    obsScreenSource.includes("height: `${STAGE_HEIGHT_PX}px`") &&
+    obsScreenSource.includes("transform: `scale(${scale})`") &&
+    obsScreenSource.includes('transformOrigin: "center center"') &&
+    obsScreenSource.includes(
+      "w-screen h-screen flex items-center justify-center overflow-hidden"
+    )
+)
+check(
+  "фигуры стоят на полу во весь рост: квадрат 80% высоты, без лимита ширины",
+  sceneStageSource.includes("aspect-square h-[80%] w-auto") &&
+    sceneStageSource.includes(
+      "pointer-events-none size-full object-contain object-bottom"
+    ) &&
+    // Слой на весь кадр: иначе высота в процентах не разрешается и фигура
+    // вылезает в натуральном размере (баг «гигантских» персонажей).
+    sceneStageSource.includes("absolute inset-0 overflow-hidden") &&
+    !sceneStageSource.includes("w-[28%]") &&
+    !sceneStageSource.includes("h-[70%]") &&
+    !sceneStageSource.includes("h-[88%]")
+)
+check(
+  "Viewport — компактные 10vh и 4:3, поле карт — та же пропорция",
+  sceneViewportSource.includes(
+    "relative mx-auto aspect-[4/3] h-[10vh] w-auto max-w-full overflow-hidden rounded-lg bg-black"
+  ) &&
+    sceneViewportSource.includes("<SceneStage className=\"size-full\"") &&
+    battleMapTabSource.includes('aspect-[4/3] w-full shrink-0 overflow-hidden')
+)
+check(
+  "поле карт рисует арт активного состояния карты (картинка или видео)",
+  battleMapTabSource.includes(
+    "const activeMapSrc = activeMap ? backgroundStateSrc(activeMap) : \"\""
+  ) &&
+    battleMapTabSource.includes("isVideoSrc(activeMapSrc)") &&
+    battleMapTabSource.includes(
+      "pointer-events-none absolute inset-0 size-full object-cover"
+    )
+)
+check(
+  "эфирный кадр карты: фон состояния + сетка с токенами поверх",
+  sceneStageSource.includes("backgroundStateSrc(background)") &&
+    sceneStageSource.includes("isBackgroundBattlemap(background)") &&
+    sceneStageSource.includes(
+      '<BattleMapGrid mapId={background.id} className="absolute inset-0" />'
+    )
+)
+check(
+  "карточки карт вписаны в колонку: 100% ширины, 4:3, название плашкой",
+  battleMapTabSource.includes("overflow-hidden p-1") &&
+    battleMapTabSource.includes("min-w-0 w-full flex-1") === false &&
+    battleMapTabSource.includes(
+      "aspect-[4/3] w-full max-w-full shrink-0 cursor-pointer overflow-hidden"
+    ) &&
+    battleMapTabSource.includes("truncate bg-black/75") &&
+    // Фиксированных пиксельных ширин, распирающих колонку, больше нет.
+    !battleMapTabSource.includes("aspect-square w-full")
+)
+
+// Кубики: инвариант калибровки (процент ширины подложки) на геометрии 4:3.
+const diceGeometryOnScreen = { plateWidthPx: 1440 - 192, plateHeightPx: 1080 - 192 }
+check(
+  "кубик занимает заданный процент ширины подложки 1440×1080",
+  DICE_WIDTH_PERCENT.every((percent, index) => {
+    const width = diceWidthPx(
+      diceScaleForCount(index + 1, diceGeometryOnScreen),
+      diceGeometryOnScreen
+    )
+    return Math.abs(width - (percent / 100) * diceGeometryOnScreen.plateWidthPx) < 1
+  }),
+  DICE_WIDTH_PERCENT.map((percent) =>
+    diceWidthPx(
+      diceScaleForCount(DICE_WIDTH_PERCENT.indexOf(percent) + 1, diceGeometryOnScreen),
+      diceGeometryOnScreen
+    ).toFixed(0)
+  ).join("/")
+)
+check(
+  "эталон подложки кубиков — сцена 1440×1080 минус отступы (1248×888)",
+  DICE_REFERENCE_GEOMETRY.plateWidthPx === 1440 - 2 * 96 &&
+    DICE_REFERENCE_GEOMETRY.plateHeightPx === 1080 - 2 * 96,
+  `${DICE_REFERENCE_GEOMETRY.plateWidthPx}×${DICE_REFERENCE_GEOMETRY.plateHeightPx}`
+)
+check(
+  "подложка кубиков внутри сцены и не зависит от размеров окна",
+  diceOverlaySource.includes("const PLATE_INSET_PX = 96") &&
+    diceOverlaySource.includes("style={{ inset: PLATE_INSET_PX }}") &&
+    // Ни одного отступа в vw: он считается от окна, а не от виртуальной сцены.
+    !diceOverlaySource.includes("inset-[5vw]") &&
+    !diceOverlaySource.includes("bottom-[5vw]")
+)
+check(
+  "мир физики меряется лейаутными пикселями: масштаб окна в него не входит",
+  diceOverlaySource.includes("container.offsetWidth") &&
+    diceOverlaySource.includes("container.offsetHeight")
+)
+check(
+  "память и живучесть кубиков: clear(), пересборка по потере WebGL и сторож",
+  diceOverlaySource.includes("diceBox.clear()") &&
+    diceOverlaySource.includes("webglcontextlost") &&
+    diceOverlaySource.includes("acquireDiceEngine") &&
+    diceOverlaySource.includes("DICE_ROLL_WATCHDOG_MS")
+)
+
+// --- Фаза 36: карты местности снова работают (флаг, арт, сетка с токенами) ---
+resetSmokeEpisode()
+const mapFlagSceneId = store().backgrounds[0].id
+// Замена картинки материализует «Обычное» — раньше это замораживало флаг карты,
+// и сцена, которую потом делали картой, теряла сетку и токены.
+store().updateBackgroundImage(mapFlagSceneId, "data:image/png;base64,SCENE")
+const mapFlagScene = () =>
+  store().backgrounds.find((item) => item.id === mapFlagSceneId)!
+store().toggleBattlemapMode(mapFlagSceneId)
+const becameMap = isBackgroundBattlemap(mapFlagScene())
+store().toggleBattlemapMode(mapFlagSceneId)
+check(
+  "флаг карты не замораживается состоянием «Обычное»",
+  becameMap &&
+    mapFlagScene().isBattlemap === false &&
+    isBackgroundBattlemap(mapFlagScene()) === false &&
+    backgroundStates(mapFlagScene())[0].isBattlemap === undefined,
+  `карта: ${becameMap}, флаг: ${mapFlagScene().isBattlemap}`
+)
+
+// Файл старого формата мог записать «Обычному» свой `isBattlemap: false`:
+// решает флаг самой сцены, иначе карта осталась бы без сетки.
+store().importEpisode(
+  parseEpisodeFile(
+    JSON.stringify({
+      campaign: "Карта",
+      backgrounds: [
+        {
+          id: "bg-legacy-map-state",
+          title: "Карта",
+          src: "/placeholders/scene-1.jpg",
+          actGroup: "Завязка",
+          isBattlemap: true,
+          states: [
+            {
+              id: "default",
+              name: "Обычное",
+              src: "/placeholders/scene-1.jpg",
+              isBattlemap: false,
+            },
+          ],
+        },
+      ],
+      characters: [],
+      tracks: [],
+      mapTokens: [],
+      sceneNotes: {},
+    })
+  )
+)
+const legacyMapScene = store().backgrounds.find(
+  (item) => item.id === "bg-legacy-map-state"
+)!
+check(
+  "сцена-карта со старым «Обычным» всё равно рисует сетку",
+  isBackgroundBattlemap(legacyMapScene) === true &&
+    backgroundStateSrc(legacyMapScene) === "/placeholders/scene-1.jpg"
+)
+
+// --- Фаза 37: мгновенная синхронизация (без debounce) и резкие персонажи ---
+resetSmokeEpisode()
+teardownEpisodeSync()
+const stopFastMaster = initEpisodeSync("master")
+await waitFor(() => getSyncStatus() === "live")
+
+/*
+ * Дебаунса в отправке нет: подписка на стор зовёт flushSnapshot синхронно, в том
+ * же тике, где Мастер кликнул сцену. Раньше снапшот ждал 30 мс таймера, и экран
+ * приходил с задержкой, похожей на «клик не сработал».
+ */
+check(
+  "снапшот уходит синхронно: подписка на стор зовёт flushSnapshot без debounce",
+  episodeSyncSource.includes("useEpisodeStore.subscribe(() => flushSnapshot())") &&
+    !episodeSyncSource.includes("SNAPSHOT_DELAY_MS") &&
+    !episodeSyncSource.includes("scheduleSnapshot") &&
+    !/setTimeout\(\(\) => flushSnapshot/.test(episodeSyncSource)
+)
+check(
+  "локальный канал второго окна: мастер шлёт, экран применяет первый пришедший",
+  episodeSyncSource.includes('const LOCAL_CHANNEL_NAME = "pedinburg-episode-sync"') &&
+    episodeSyncSource.includes("localChannel?.postMessage(json)") &&
+    episodeSyncSource.includes("function applyRemoteSnapshot") &&
+    episodeSyncSource.includes("if (raw === lastAppliedSnapshot) return")
+)
+
+// Второе окно: живой пир по сокету + подписка на локальный канал в этом процессе.
+const fastPeer = await openPeer("screen")
+fastPeer.send({ type: "request-state" })
+await waitFor(() => fastPeer.inbox.some((message) => message.type === "state"))
+
+const localChannelName = "pedinburg-episode-sync"
+const channelPeer =
+  typeof BroadcastChannel === "undefined"
+    ? null
+    : new BroadcastChannel(localChannelName)
+const channelInbox: string[] = []
+if (channelPeer) {
+  channelPeer.onmessage = (event: MessageEvent) =>
+    channelInbox.push(String(event.data))
+  // В Node канал держал бы процесс открытым до самого таймаута прогона.
+  ;(channelPeer as BroadcastChannel & { unref?: () => void }).unref?.()
+}
+
+// Свежая сцена: гарантированно меняет снапшот, даже если клик «ничего не менял».
+const fastSceneId = store().addBackground("Завязка", {
+  title: "Мгновенная сцена",
+  src: "/placeholders/scene-1.jpg",
+  activate: false,
+})
+await wait(50)
+const clickedAt = Date.now()
+store().setActiveBackground(fastSceneId)
+const onScreenNow = await waitFor(
+  () =>
+    fastPeer.inbox.some(
+      (message) =>
+        message.type === "state" && message.payload.activeBackgroundId === fastSceneId
+    ),
+  2000,
+  5
+)
+const socketMs = Date.now() - clickedAt
+check(
+  "клик Мастера по сцене доезжает до /screen мгновенно",
+  onScreenNow && socketMs < 250,
+  `${socketMs} мс`
+)
+check(
+  "тот же снапшот уходит в BroadcastChannel: вкладке /screen сервер не нужен",
+  channelPeer
+    ? await waitFor(() => channelInbox.some((raw) => raw.includes(fastSceneId)), 2000, 5)
+    : true,
+  channelPeer ? `сообщений в канале: ${channelInbox.length}` : "BroadcastChannel недоступен"
+)
+channelPeer?.close()
+fastPeer.close()
+stopFastMaster()
+teardownEpisodeSync()
+
+/*
+ * Экран применяет снапшот ровно один раз: тот же JSON приходит двумя
+ * транспортами, и второй обязан быть отброшен — иначе каждая сцена на /screen
+ * монтировалась бы дважды (двойной кроссфейд, двойная работа).
+ */
+const stopFastScreen = initEpisodeSync("screen")
+// Даём серверу отдать кэш, чтобы он не попал в подсчёт применений.
+await wait(250)
+let remoteApplies = 0
+const unsubscribeRemoteApplies = useEpisodeStore.subscribe((state) => {
+  if (state.activeBackgroundId === remoteState.activeBackgroundId) remoteApplies += 1
+})
+const stateJson = JSON.stringify({ type: "state", payload: remoteState })
+const duplexChannel = new BroadcastChannel(localChannelName)
+;(duplexChannel as BroadcastChannel & { unref?: () => void }).unref?.()
+duplexChannel.postMessage(stateJson)
+const appliedFromChannel = await waitFor(
+  () => store().activeBackgroundId === remoteState.activeBackgroundId,
+  2000,
+  5
+)
+duplexChannel.postMessage(stateJson)
+await wait(150)
+unsubscribeRemoteApplies()
+duplexChannel.close()
+stopFastScreen()
+teardownEpisodeSync()
+check(
+  "дубль снапшота из второго транспорта не применяется повторно",
+  appliedFromChannel && remoteApplies === 1,
+  `применений: ${remoteApplies}`
+)
+
+// Правая панель: жёсткая ширина, сетка в 2 колонки и пропорции 70/30.
+check(
+  "правая панель зажата по ширине: min-w-0/overflow-hidden у сайдбара и колонки",
+  globalAudioSidebarSource.includes(
+    "flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden pr-0.5 pl-2"
+  ) && masterPanelSource.includes('className="min-w-[85px] overflow-hidden"')
+)
+check(
+  "саундпад — 70% высоты, треки — 30%, у обоих свой скролл",
+  globalAudioSidebarSource.includes("flex min-h-0 flex-[7] flex-col gap-1.5 overflow-hidden") &&
+    globalAudioSidebarSource.includes("flex min-h-0 flex-[3] flex-col gap-1.5 overflow-hidden") &&
+    (globalAudioSidebarSource.match(/<ScrollArea className="min-h-0 w-full flex-1">/g) ?? [])
+      .length === 2
+)
+check(
+  "плитки звуков и треков — сетка в 2 колонки шириной с панель",
+  (globalAudioSidebarSource.match(/grid w-full min-w-0 grid-cols-2 gap-2 pb-1/g) ?? [])
+    .length === 2 &&
+    globalAudioSidebarSource.includes(
+      "flex aspect-square w-full flex-col items-center justify-center"
+    )
+)
+
+// Резкость: кадр не остаётся на отдельном слое композитинга после проявления.
+check(
+  "персонажи не мылятся: анимация проявления снимается после её конца",
+  crossfadeImageSource.includes('className={cn(className, isEntering && "animate-in fade-in")}') &&
+    crossfadeImageSource.includes('const [settledSrc, setSettledSrc] = useState<string | null>(null)') &&
+    crossfadeImageSource.includes('willChange: "auto"') &&
+    crossfadeImageSource.includes('transform: "none"')
+)
+check(
+  "кадр персонажа просит нативное качество масштабирования, без translateZ",
+  sceneStageSource.includes("[image-rendering:high-quality]") &&
+    !sceneStageSource.includes("translateZ") &&
+    !sceneStageSource.includes("translate3d")
+)
+check(
+  "выезд персонажа заканчивается целой позицией: y 0% вход, 100% уход",
+  sceneStageSource.includes('animate={{ y: "0%" }}') &&
+    sceneStageSource.includes('exit={{ y: "100%" }}')
 )
 
 if (failures.length > 0) {

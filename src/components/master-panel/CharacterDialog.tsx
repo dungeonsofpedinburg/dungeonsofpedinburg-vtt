@@ -22,7 +22,7 @@ import {
 import { tokenCategories } from "@/data/content"
 import { prepareImageFile } from "@/lib/image-file"
 import type { CharacterInput, CharacterImagePatch } from "@/store/useEpisodeStore"
-import type { Character, TokenCategory } from "@/data/types"
+import type { Character, CharacterState, TokenCategory } from "@/data/types"
 
 function useImagePicker() {
   const [preview, setPreview] = useState("")
@@ -195,6 +195,98 @@ export function CreateCharacterDialog({
             onClick={submit}
           >
             Добавить
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/**
+ * Диалог нового состояния персонажа: название, токен для карты и полноростовая
+ * иллюстрация для сцены. После подтверждения состояние сразу становится активным
+ * (это делает стор), поэтому токен и сцена обновляются мгновенно.
+ *
+ * Картинки можно не выбирать: у нового варианта останутся картинки «Обычного» —
+ * так «Раненый» с той же иллюстрацией создаётся одним названием.
+ */
+export function AddCharacterStateDialog({
+  open,
+  character,
+  onOpenChange,
+  onSubmit,
+}: {
+  open: boolean
+  character: Character | null
+  onOpenChange: (open: boolean) => void
+  onSubmit: (state: Omit<CharacterState, "id">) => void
+}) {
+  const [name, setName] = useState("")
+  const tokenPicker = useImagePicker()
+  const figurePicker = useImagePicker()
+
+  function submit() {
+    onSubmit({
+      name,
+      avatarSrc: tokenPicker.preview,
+      fullBodyPngSrc: figurePicker.preview,
+    })
+    setName("")
+    tokenPicker.reset()
+    figurePicker.reset()
+    onOpenChange(false)
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Новое состояние</DialogTitle>
+          <DialogDescription>
+            {character
+              ? `${character.name} · вариант внешнего вида для токена и сцены`
+              : "Выберите персонажа"}
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-3">
+          <div className="space-y-2">
+            <Label htmlFor="character-state-name">Название состояния</Label>
+            <Input
+              id="character-state-name"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              placeholder="Раненый, В ярости, Без плаща…"
+            />
+          </div>
+
+          <ImagePickerField
+            id="character-state-avatar"
+            label="Токен на карте"
+            picker={tokenPicker}
+            currentSrc={character?.avatarSrc}
+          />
+          <ImagePickerField
+            id="character-state-figure"
+            label="Иллюстрация для сцены (полный рост)"
+            picker={figurePicker}
+            currentSrc={character?.fullBodyPngSrc}
+          />
+
+          <p className="text-xs text-muted-foreground">
+            Без выбранных картинок вариант останется с картинками «Обычного».
+          </p>
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            Отмена
+          </Button>
+          <Button
+            disabled={!character || tokenPicker.isBusy || figurePicker.isBusy}
+            onClick={submit}
+          >
+            Добавить состояние
           </Button>
         </DialogFooter>
       </DialogContent>

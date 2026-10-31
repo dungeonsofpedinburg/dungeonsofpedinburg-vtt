@@ -81,16 +81,44 @@ export function episodeAssetFields(file: EpisodeFile) {
       field: `backgrounds[${index}].src`,
       value: item.src,
     })),
-    // Состояния сцены: «Ночь», «Пожар» — их кадры тоже обязаны уехать в папку.
-    ...file.backgrounds.flatMap((item, index) =>
-      (item.states ?? []).map((state, stateIndex) => ({
-        field: `backgrounds[${index}].states[${stateIndex}].src`,
-        value: state.src,
-      }))
-    ),
+    // Звук появления сцены — такой же ассет выпуска, как её кадры.
+    ...file.backgrounds.flatMap((item, index) => [
+      ...(item.appearance
+        ? [
+            {
+              field: `backgrounds[${index}].appearance.soundSrc`,
+              value: item.appearance.soundSrc ?? "",
+            },
+          ]
+        : []),
+      // Состояния сцены: «Ночь», «Пожар» — их кадры тоже обязаны уехать в папку.
+      ...(item.states ?? []).flatMap((state, stateIndex) => [
+        {
+          field: `backgrounds[${index}].states[${stateIndex}].src`,
+          value: state.src,
+        },
+        ...(state.appearance
+          ? [
+              {
+                field: `backgrounds[${index}].states[${stateIndex}].appearance.soundSrc`,
+                value: state.appearance.soundSrc ?? "",
+              },
+            ]
+          : []),
+      ]),
+    ]),
     ...file.characters.flatMap((item, index) => [
       { field: `characters[${index}].avatarSrc`, value: item.avatarSrc },
       { field: `characters[${index}].fullBodyPngSrc`, value: item.fullBodyPngSrc },
+      // Звук появления — такой же ассет выпуска, как картинки.
+      ...(item.appearance
+        ? [
+            {
+              field: `characters[${index}].appearance.soundSrc`,
+              value: item.appearance.soundSrc ?? "",
+            },
+          ]
+        : []),
       // Варианты внешнего вида: их картинки тоже обязаны уехать в папку выпуска.
       ...(item.states ?? []).flatMap((state, stateIndex) => [
         {
@@ -101,6 +129,14 @@ export function episodeAssetFields(file: EpisodeFile) {
           field: `characters[${index}].states[${stateIndex}].fullBodyPngSrc`,
           value: state.fullBodyPngSrc,
         },
+        ...(state.appearance
+          ? [
+              {
+                field: `characters[${index}].states[${stateIndex}].appearance.soundSrc`,
+                value: state.appearance.soundSrc ?? "",
+              },
+            ]
+          : []),
       ]),
     ]),
     ...file.tracks.flatMap((item, index) => [
@@ -157,17 +193,43 @@ export function sanitizeEpisodeForExport(file: EpisodeFile) {
   const clean = (value: string, field: string) =>
     cleanAssetValue(value, field, issues)
 
+  /**
+   * Настройки появления (персонажа или сцены): путь к звуку чистим как прочие
+   * ассеты — встроенный файл (data-URL) в JSON не попадает. Сам объект
+   * `appearance` оставляем (даже без `soundSrc`): по его наличию список ассетов
+   * знает, что поле вообще было.
+   */
+  const cleanAppearance = <T extends { soundSrc?: string }>(
+    appearance: T | undefined,
+    field: string
+  ): T | undefined => {
+    if (!appearance) return undefined
+    const next: T = { ...appearance }
+    const soundSrc = clean(appearance.soundSrc ?? "", field)
+    if (soundSrc) next.soundSrc = soundSrc
+    else delete next.soundSrc
+    return next
+  }
+
   const result: EpisodeFile = {
     ...file,
     backgrounds: file.backgrounds.map((item, index) => ({
       ...item,
       src: clean(item.src, `backgrounds[${index}].src`),
+      appearance: cleanAppearance(
+        item.appearance,
+        `backgrounds[${index}].appearance.soundSrc`
+      ),
       // Кадры состояний сцены чистим так же, как базовый: встроенные выбрасываем.
       states: (item.states ?? []).map((state, stateIndex) => ({
         ...state,
         src: clean(
           state.src,
           `backgrounds[${index}].states[${stateIndex}].src`
+        ),
+        appearance: cleanAppearance(
+          state.appearance,
+          `backgrounds[${index}].states[${stateIndex}].appearance.soundSrc`
         ),
       })),
     })),
@@ -178,9 +240,17 @@ export function sanitizeEpisodeForExport(file: EpisodeFile) {
         item.fullBodyPngSrc,
         `characters[${index}].fullBodyPngSrc`
       ),
+      appearance: cleanAppearance(
+        item.appearance,
+        `characters[${index}].appearance.soundSrc`
+      ),
       // Картинки вариантов внешнего вида чистим так же, как базовые.
       states: (item.states ?? []).map((state, stateIndex) => ({
         ...state,
+        appearance: cleanAppearance(
+          state.appearance,
+          `characters[${index}].states[${stateIndex}].appearance.soundSrc`
+        ),
         avatarSrc: clean(
           state.avatarSrc,
           `characters[${index}].states[${stateIndex}].avatarSrc`
@@ -325,11 +395,48 @@ export async function persistEpisodeAssets(file: EpisodeFile, episodeSlug: strin
             `${item.title} ${state.name}`,
             state.src
           ),
+          // Звук появления состояния — «короткий звук», кладём рядом со сценой.
+          ...(state.appearance
+            ? {
+                appearance: {
+                  ...state.appearance,
+                  ...(state.appearance.soundSrc
+                    ? {
+                        soundSrc: await persist(
+                          `backgrounds[${index}].states[${stateIndex}].appearance.soundSrc`,
+                          inEpisode(ASSET_FOLDERS.scenes),
+                          `${item.id}-${state.id}-appear`,
+                          `${item.title} ${state.name} появление`,
+                          state.appearance.soundSrc
+                        ),
+                      }
+                    : {}),
+                },
+              }
+            : {}),
         }))
       )
       return {
         ...item,
         states,
+        ...(item.appearance
+          ? {
+              appearance: {
+                ...item.appearance,
+                ...(item.appearance.soundSrc
+                  ? {
+                      soundSrc: await persist(
+                        `backgrounds[${index}].appearance.soundSrc`,
+                        inEpisode(ASSET_FOLDERS.scenes),
+                        `${item.id}-appear`,
+                        `${item.title} появление`,
+                        item.appearance.soundSrc
+                      ),
+                    }
+                  : {}),
+              },
+            }
+          : {}),
         src: await persist(
           `backgrounds[${index}].src`,
           inEpisode(ASSET_FOLDERS.scenes),
@@ -366,11 +473,52 @@ export async function persistEpisodeAssets(file: EpisodeFile, episodeSlug: strin
             state.fullBodyPngSrc
           ),
         ])
-        states.push({ ...state, avatarSrc, fullBodyPngSrc })
+        states.push({
+          ...state,
+          avatarSrc,
+          fullBodyPngSrc,
+          // Звук появления состояния — «короткий звук», как у саундпада.
+          ...(state.appearance
+            ? {
+                appearance: {
+                  ...state.appearance,
+                  ...(state.appearance.soundSrc
+                    ? {
+                        soundSrc: await persist(
+                          `characters[${index}].states[${stateIndex}].appearance.soundSrc`,
+                          inEpisode(ASSET_FOLDERS.soundpad),
+                          `${item.id}-${state.id}-appear`,
+                          `${item.name} ${state.name} появление`,
+                          state.appearance.soundSrc
+                        ),
+                      }
+                    : {}),
+                },
+              }
+            : {}),
+        })
       }
       return {
         ...item,
         states,
+        ...(item.appearance
+          ? {
+              appearance: {
+                ...item.appearance,
+                ...(item.appearance.soundSrc
+                  ? {
+                      soundSrc: await persist(
+                        `characters[${index}].appearance.soundSrc`,
+                        inEpisode(ASSET_FOLDERS.soundpad),
+                        `${item.id}-appear`,
+                        `${item.name} появление`,
+                        item.appearance.soundSrc
+                      ),
+                    }
+                  : {}),
+              },
+            }
+          : {}),
         avatarSrc: await persist(
           `characters[${index}].avatarSrc`,
           folder,

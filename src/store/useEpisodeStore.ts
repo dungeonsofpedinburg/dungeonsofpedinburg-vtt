@@ -38,8 +38,10 @@ import {
 import type {
   ActGroup,
   Background,
+  BackgroundAppearance,
   BackgroundState,
   Character,
+  CharacterAppearance,
   CharacterState,
   DiceRollEvent,
   DiceRollResult,
@@ -158,6 +160,27 @@ type EpisodeState = {
    * Поле локальное для вкладки и в снапшот состояния не попадает.
    */
   syncScreens: number
+  /**
+   * Ключи «уже появлялись»: `${characterId}:${stateId}` — для режима "once".
+   * Ставится в `SceneStage` после фактического появления, поэтому анимация и
+   * звук принимают решение по одному и тому же флагу.
+   */
+  playedAppearanceKeys: string[]
+  /** Отметить появление проигранным (once). */
+  markAppearancePlayed: (key: string) => void
+  /** Полная очистка (resetEpisode / importEpisode / «экран пуст»). */
+  clearPlayedAppearances: () => void
+  /** Сохранить настройки появления для всех состояний персонажа. */
+  setCharacterAppearance: (
+    characterId: string,
+    patch: CharacterAppearance
+  ) => void
+  /** Сохранить настройки появления только для конкретного состояния. */
+  setCharacterStateAppearance: (
+    characterId: string,
+    stateId: string,
+    patch: CharacterAppearance
+  ) => void
 
   setActiveBackground: (backgroundId: string) => void
   renameEpisode: (title: string) => void
@@ -176,6 +199,17 @@ type EpisodeState = {
   setActiveBackgroundState: (backgroundId: string, stateId: string) => void
   /** Удалить состояние сцены; «Обычное» удалить нельзя */
   removeBackgroundState: (backgroundId: string, stateId: string) => void
+  /** Сохранить звук появления для всех состояний сцены. */
+  setBackgroundAppearance: (
+    backgroundId: string,
+    patch: BackgroundAppearance
+  ) => void
+  /** Сохранить звук появления только для конкретного состояния сцены. */
+  setBackgroundStateAppearance: (
+    backgroundId: string,
+    stateId: string,
+    patch: BackgroundAppearance
+  ) => void
   setActiveMap: (mapId: string) => void
   addBackground: (actGroup: ActGroup, options?: AddBackgroundOptions) => string
   /** Новый разделитель в конце списка: возвращает его имя для инлайн-правки */
@@ -245,6 +279,10 @@ type EpisodeState = {
   deleteBatchTracks: (ids: string[]) => void
   deleteBatchSoundpadSlots: (ids: string[]) => void
   toggleCharacterOnStage: (characterId: string) => void
+  /** Добавить персонажа на сцену, если его там нет и есть место. No-op иначе. */
+  addCharacterToStage: (characterId: string) => void
+  /** Убрать персонажа со сцены, если он там есть. No-op иначе. */
+  removeCharacterFromStage: (characterId: string) => void
   /** Убрать со сцены всех сразу — клик по превью в Viewport Мастера */
   clearStage: () => void
   addToken: (
@@ -413,6 +451,35 @@ const IDLE_STAGE = {
   activeCharacterIds: [] as string[],
 }
 
+/**
+ * Мерж настроек появления: поле, которого нет в патче (`undefined`), остаётся
+ * прежним. Пустая строка `soundSrc` — это осознанное «без звука», она пишется.
+ */
+function mergeAppearance(
+  current: CharacterAppearance | undefined,
+  patch: CharacterAppearance
+): CharacterAppearance {
+  const result: CharacterAppearance = { ...(current ?? {}) }
+  if (patch.soundSrc !== undefined) result.soundSrc = patch.soundSrc
+  if (patch.soundMode !== undefined) result.soundMode = patch.soundMode
+  if (patch.effect !== undefined) result.effect = patch.effect
+  return result
+}
+
+/**
+ * Мерж звука появления сцены. Пустой объект не создаём: «настроек нет» и
+ * «настройки пустые» — одно и то же, а лишний `appearance: {}` в JSON шумит.
+ */
+function mergeSoundAppearance(
+  current: BackgroundAppearance | undefined,
+  patch: BackgroundAppearance
+): BackgroundAppearance | undefined {
+  const result: BackgroundAppearance = { ...(current ?? {}) }
+  if (patch.soundSrc !== undefined) result.soundSrc = patch.soundSrc
+  if (patch.soundMode !== undefined) result.soundMode = patch.soundMode
+  return Object.keys(result).length > 0 ? result : undefined
+}
+
 export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
   episodeTitle: campaign.title,
   episodeSlug: generateEpisodeSlug(campaign.title),
@@ -433,6 +500,9 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
   lastRollEvent: null,
   isRollPending: false,
   syncScreens: 0,
+  // Память «появление уже случилось» живёт до сброса выпуска: у панели
+  // Мастера и у /screen она своя.
+  playedAppearanceKeys: [],
   videoPlayback: initialVideoPlayback(),
 
   setActiveBackground: (backgroundId) =>
@@ -513,6 +583,40 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
           ? { ...background, activeStateId: stateId }
           : background
       ),
+    })),
+
+  setBackgroundAppearance: (backgroundId, patch) =>
+    set((state) => ({
+      backgrounds: state.backgrounds.map((background) =>
+        background.id === backgroundId
+          ? {
+              ...background,
+              appearance: mergeSoundAppearance(background.appearance, patch),
+            }
+          : background
+      ),
+    })),
+
+  setBackgroundStateAppearance: (backgroundId, stateId, patch) =>
+    set((state) => ({
+      backgrounds: state.backgrounds.map((background) => {
+        if (background.id !== backgroundId) return background
+        // `backgroundStates` подставляет «Обычное», если его ещё нет в массиве:
+        // правка «Обычного» материализует состояние, а не теряется.
+        const states = backgroundStates(background)
+        if (!states.some((item) => item.id === stateId)) return background
+        return {
+          ...background,
+          states: states.map((item) =>
+            item.id === stateId
+              ? {
+                  ...item,
+                  appearance: mergeSoundAppearance(item.appearance, patch),
+                }
+              : item
+          ),
+        }
+      }),
     })),
 
   removeBackgroundState: (backgroundId, stateId) => {
@@ -977,6 +1081,49 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
       ),
     })),
 
+  markAppearancePlayed: (key) =>
+    set((state) =>
+      state.playedAppearanceKeys.includes(key)
+        ? {}
+        : { playedAppearanceKeys: [...state.playedAppearanceKeys, key] }
+    ),
+
+  clearPlayedAppearances: () => set({ playedAppearanceKeys: [] }),
+
+  setCharacterAppearance: (characterId, patch) =>
+    set((state) => ({
+      characters: state.characters.map((character) =>
+        character.id === characterId
+          ? {
+              ...character,
+              appearance: mergeAppearance(character.appearance, patch),
+            }
+          : character
+      ),
+    })),
+
+  setCharacterStateAppearance: (characterId, stateId, patch) =>
+    set((state) => ({
+      characters: state.characters.map((character) => {
+        if (character.id !== characterId) return character
+        // `characterStates` подставляет «Обычное», если его ещё нет в массиве:
+        // так правка «Обычного» материализует состояние, а не теряется.
+        const states = characterStates(character)
+        if (!states.some((item) => item.id === stateId)) return character
+        return {
+          ...character,
+          states: states.map((item) =>
+            item.id === stateId
+              ? {
+                  ...item,
+                  appearance: mergeAppearance(item.appearance, patch),
+                }
+              : item
+          ),
+        }
+      }),
+    })),
+
   removeCharacter: (characterId) => {
     set((state) => ({
       characters: state.characters.filter(
@@ -1161,6 +1308,29 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
       return
     }
     set({ activeCharacterIds: [...state.activeCharacterIds, characterId] })
+  },
+
+  /*
+   * Детерминированное добавление и убирание: кнопке «Команда»/«Убрать» нужен
+   * именно результат («стоит на сцене» / «не стоит»), а toggle перевернул бы
+   * состояние при повторном срабатывании таймера. Оба экшена молчат на no-op:
+   * лишние тосты в шоу раздражают, а мастер и так видит, что ничего не изменилось.
+   */
+  addCharacterToStage: (characterId) => {
+    const state = get()
+    if (state.activeCharacterIds.includes(characterId)) return
+    if (state.activeCharacterIds.length >= MAX_STAGE_CHARACTERS) return
+    set({ activeCharacterIds: [...state.activeCharacterIds, characterId] })
+  },
+
+  removeCharacterFromStage: (characterId) => {
+    const state = get()
+    if (!state.activeCharacterIds.includes(characterId)) return
+    set({
+      activeCharacterIds: state.activeCharacterIds.filter(
+        (id) => id !== characterId
+      ),
+    })
   },
 
   /** Клик по превью Viewport: сцена пустеет, все фигуры уезжают вниз. */
@@ -1363,6 +1533,8 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
       isRollPending: false,
       // Новый выпуск — видео с начала и на паузе не стоит.
       videoPlayback: initialVideoPlayback(),
+      // Память «появление сыграно» — тоже с чистого листа.
+      playedAppearanceKeys: [],
     })
   },
 
@@ -1440,6 +1612,8 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
         isRollPending: false,
         // Импорт — как новый выпуск: видео-команды прежней сессии не переносим.
         videoPlayback: initialVideoPlayback(),
+        // И «once»-появления тоже: файл приехал — значит всё впереди.
+        playedAppearanceKeys: [],
       }
     })
   },
@@ -1453,6 +1627,11 @@ export const useEpisodeStore = create<EpisodeState>()((set, get) => ({
       // Сцена приезжает снапшотом целиком: SceneStage сам сравнит список с
       // предыдущим кадром и проиграет выезд/задвигание фигур.
       activeCharacterIds: remote.activeCharacterIds ?? [],
+      // Пустая сцена (сброс или импорт на мастере) обнуляет и «once»-память:
+      // иначе экран помнил бы появления, которых уже нет в выпуске.
+      ...((remote.activeCharacterIds ?? []).length === 0
+        ? { playedAppearanceKeys: [] }
+        : {}),
       mapTokens: remote.mapTokens,
       activeMapId: remote.activeMapId,
       lastRoll: remote.lastRoll,

@@ -6,6 +6,8 @@
  * здесь, а не в компоненте, чтобы их можно было проверить смоуком.
  */
 
+import type { Character } from "@/data/types"
+
 /** Сколько персонажей/предметов пускаем на сцену одновременно. */
 export const MAX_STAGE_CHARACTERS = 4
 
@@ -66,4 +68,49 @@ export function characterStagePositions(count: number): number[] {
 export function characterStagePosition(index: number, count: number) {
   const positions = characterStagePositions(count)
   return positions[index] ?? positions[positions.length - 1] ?? 50
+}
+
+/**
+ * Персонажи-герои в порядке их массива (порядок рельса). Кнопка «Команда»
+ * выводит их на сцену именно в этом порядке — так мастер видит предсказуемый
+ * сценарий: «все герои выходят слева направо».
+ */
+export function heroCharacters(characters: Character[]): Character[] {
+  return characters.filter((character) => character.category === "hero")
+}
+
+/**
+ * id героев, которые сейчас на сцене, в порядке activeCharacterIds.
+ * Не-герои из списка отфильтровываются: кнопка «Убрать» работает только с
+ * героями и не должна трогать NPC, противников и предметы на сцене.
+ */
+export function heroesOnStage(
+  activeCharacterIds: string[],
+  characters: Character[]
+): string[] {
+  const heroIds = new Set(heroCharacters(characters).map((hero) => hero.id))
+  return activeCharacterIds.filter((id) => heroIds.has(id))
+}
+
+/**
+ * Пора ли показывать «Убрать» вместо «Команда».
+ *
+ * Целевое число героев на сцене — `min(totalHeroes, MAX_STAGE_CHARACTERS)`:
+ *  * если в шоу меньше четырёх героев, кнопка переключается, когда вышли
+ *    ВСЕ герои (двух из двух, трёх из трёх);
+ *  * если героев четыре и больше, кнопка переключается, когда все слоты
+ *    заняты героями (четыре из N).
+ *
+ * Пустые случаи: героев нет на сцене — «Команда»; героев нет в шоу —
+ * вызывающий код вообще не рисует кнопку, но функция на всякий случай
+ * возвращает false.
+ */
+export function shouldShowRemoveLabel(input: {
+  heroesOnStageCount: number
+  totalHeroes: number
+}): boolean {
+  const { heroesOnStageCount, totalHeroes } = input
+  if (heroesOnStageCount <= 0 || totalHeroes <= 0) return false
+  const target = Math.min(totalHeroes, MAX_STAGE_CHARACTERS)
+  return heroesOnStageCount >= target
 }

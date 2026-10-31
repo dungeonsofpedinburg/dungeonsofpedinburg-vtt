@@ -19,6 +19,7 @@ import {
   getBackgroundActiveState,
   hasCustomBackgroundStates,
   isBackgroundBattlemap,
+  resolveBackgroundAppearance,
 } from "@/lib/background"
 import { CROSSFADE_MS } from "@/components/master-panel/CrossfadeImage"
 import {
@@ -28,6 +29,9 @@ import {
   STAGE_WIDTH_PX,
   characterStagePosition,
   characterStagePositions,
+  heroCharacters,
+  heroesOnStage,
+  shouldShowRemoveLabel,
   stageScale,
 } from "@/lib/stage"
 import {
@@ -90,11 +94,13 @@ import {
   characterFullBodySrc,
   characterStates,
   getCharacterActiveState,
+  resolveCharacterAppearance,
 } from "@/lib/character"
 import type { EpisodeFile, SyncedEpisode } from "@/data/types"
 import {
   DICE_DEFAULT_RAW_MASS,
   DICE_DEFAULT_RAW_THROWFORCE,
+  DICE_ENGINE_WAIT_MS,
   DICE_PHYSICS,
   DICE_REFERENCE_GEOMETRY,
   DICE_ROLL_WATCHDOG_MS,
@@ -3869,10 +3875,11 @@ check(
     !sceneStageSource.includes("h-[88%]")
 )
 check(
-  "Viewport — компактные 10vh и 4:3, поле карт — та же пропорция",
+  "Viewport — кадр 4:3 (старт 10vh), поле карт — та же пропорция",
   sceneViewportSource.includes(
-    "relative mx-auto aspect-[4/3] h-[10vh] w-auto max-w-full overflow-hidden rounded-lg bg-black"
+    "relative mx-auto aspect-[4/3] w-auto max-w-full overflow-hidden rounded-lg bg-black"
   ) &&
+    sceneViewportSource.includes("DEFAULT_VIEWPORT_HEIGHT_VH = 10") &&
     sceneViewportSource.includes("<SceneStage className=\"size-full\"") &&
     battleMapTabSource.includes('aspect-[4/3] w-full shrink-0 overflow-hidden')
 )
@@ -4123,7 +4130,7 @@ check(
   `применений: ${remoteApplies}`
 )
 
-// Правая панель: жёсткая ширина, сетка в 2 колонки и пропорции 70/30.
+// Правая панель: жёсткая ширина, одна колонка и пропорции 70/30.
 check(
   "правая панель зажата по ширине: min-w-0/overflow-hidden у сайдбара и колонки",
   globalAudioSidebarSource.includes(
@@ -4138,8 +4145,8 @@ check(
       .length === 2
 )
 check(
-  "плитки звуков и треков — сетка в 2 колонки шириной с панель",
-  (globalAudioSidebarSource.match(/grid w-full min-w-0 grid-cols-2 gap-2 pb-1/g) ?? [])
+  "плитки звуков и треков — одна колонка шириной с панель",
+  (globalAudioSidebarSource.match(/grid w-full min-w-0 grid-cols-1 gap-2 pb-1/g) ?? [])
     .length === 2 &&
     globalAudioSidebarSource.includes(
       "flex aspect-square w-full flex-col items-center justify-center"
@@ -4150,7 +4157,7 @@ check(
 check(
   "персонажи не мылятся: анимация проявления снимается после её конца",
   crossfadeImageSource.includes('className={cn(className, isEntering && "animate-in fade-in")}') &&
-    crossfadeImageSource.includes('const [settledSrc, setSettledSrc] = useState<string | null>(null)') &&
+    crossfadeImageSource.includes('const [settledSrc, setSettledSrc] = useState<string>(src)') &&
     crossfadeImageSource.includes('willChange: "auto"') &&
     crossfadeImageSource.includes('transform: "none"')
 )
@@ -4162,9 +4169,609 @@ check(
 )
 check(
   "выезд персонажа заканчивается целой позицией: y 0% вход, 100% уход",
-  sceneStageSource.includes('animate={{ y: "0%" }}') &&
-    sceneStageSource.includes('exit={{ y: "100%" }}')
+  sceneStageSource.includes('animate: { y: "0%" }') &&
+    sceneStageSource.includes('exit: { y: "100%"')
 )
+
+// --- Команда героев: хелперы стора и логика кнопки ---
+resetSmokeEpisode()
+const allCharacters = store().characters
+const allHeroes = heroCharacters(allCharacters)
+check(
+  "heroCharacters отбирает только category === 'hero'",
+  allHeroes.length === 4 &&
+    allHeroes.every((hero) => hero.category === "hero"),
+  `${allHeroes.length} героев из ${allCharacters.length}`
+)
+
+// heroesOnStage не считает не-героев, даже если они на сцене.
+store().clearStage()
+store().toggleCharacterOnStage(allCharacters[0].id) // герой
+const nonHero = allCharacters.find((c) => c.category !== "hero")!
+store().toggleCharacterOnStage(nonHero.id)
+check(
+  "heroesOnStage игнорирует не-героев из activeCharacterIds",
+  heroesOnStage(store().activeCharacterIds, allCharacters).length === 1 &&
+    store().activeCharacterIds.length === 2,
+  `на сцене: ${store().activeCharacterIds.length}, из них героев: 1`
+)
+store().clearStage()
+
+// Матрица shouldShowRemoveLabel — N < 4 (все герои) и N >= 4 (все слоты).
+check(
+  "shouldShowRemoveLabel: N=1, 1 герой на сцене → «Убрать»",
+  shouldShowRemoveLabel({ heroesOnStageCount: 1, totalHeroes: 1 }) === true
+)
+check(
+  "shouldShowRemoveLabel: N=2, 1 герой на сцене → «Команда»",
+  shouldShowRemoveLabel({ heroesOnStageCount: 1, totalHeroes: 2 }) === false
+)
+check(
+  "shouldShowRemoveLabel: N=2, 2 героя на сцене → «Убрать»",
+  shouldShowRemoveLabel({ heroesOnStageCount: 2, totalHeroes: 2 }) === true
+)
+check(
+  "shouldShowRemoveLabel: N=3, 2 героя на сцене → «Команда»",
+  shouldShowRemoveLabel({ heroesOnStageCount: 2, totalHeroes: 3 }) === false
+)
+check(
+  "shouldShowRemoveLabel: N=3, 3 героя на сцене → «Убрать»",
+  shouldShowRemoveLabel({ heroesOnStageCount: 3, totalHeroes: 3 }) === true
+)
+check(
+  "shouldShowRemoveLabel: N=4, 3 героя на сцене → «Команда»",
+  shouldShowRemoveLabel({ heroesOnStageCount: 3, totalHeroes: 4 }) === false
+)
+check(
+  "shouldShowRemoveLabel: N=4, 4 героя на сцене → «Убрать»",
+  shouldShowRemoveLabel({ heroesOnStageCount: 4, totalHeroes: 4 }) === true
+)
+check(
+  "shouldShowRemoveLabel: N=5, 4 героя на сцене → «Убрать» (все слоты заняты)",
+  shouldShowRemoveLabel({ heroesOnStageCount: 4, totalHeroes: 5 }) === true
+)
+check(
+  "shouldShowRemoveLabel: N=5, 3 героя на сцене → «Команда»",
+  shouldShowRemoveLabel({ heroesOnStageCount: 3, totalHeroes: 5 }) === false
+)
+check(
+  "shouldShowRemoveLabel: пустые случаи → false",
+  shouldShowRemoveLabel({ heroesOnStageCount: 0, totalHeroes: 4 }) === false &&
+    shouldShowRemoveLabel({ heroesOnStageCount: 0, totalHeroes: 0 }) === false &&
+    shouldShowRemoveLabel({ heroesOnStageCount: 2, totalHeroes: 0 }) === false
+)
+
+// Детерминированные экшены: add/remove конкретного персонажа.
+resetSmokeEpisode()
+const stageHeroId = store().characters.find((c) => c.category === "hero")!.id
+store().addCharacterToStage(stageHeroId)
+check(
+  "addCharacterToStage добавляет героя, если его ещё нет",
+  store().activeCharacterIds.includes(stageHeroId)
+)
+store().addCharacterToStage(stageHeroId)
+check(
+  "addCharacterToStage no-op, если персонаж уже на сцене",
+  store().activeCharacterIds.filter((id) => id === stageHeroId).length === 1
+)
+store().removeCharacterFromStage(stageHeroId)
+check(
+  "removeCharacterFromStage убирает героя",
+  !store().activeCharacterIds.includes(stageHeroId)
+)
+store().removeCharacterFromStage(stageHeroId)
+check(
+  "removeCharacterFromStage no-op, если персонажа нет на сцене",
+  store().activeCharacterIds.length === 0
+)
+
+// Лимит: addCharacterToStage не выходит за MAX_STAGE_CHARACTERS.
+resetSmokeEpisode()
+const fourHeroIds = store()
+  .characters.filter((c) => c.category === "hero")
+  .slice(0, MAX_STAGE_CHARACTERS)
+  .map((c) => c.id)
+fourHeroIds.forEach((id) => store().addCharacterToStage(id))
+const fifthNonHeroId = store()
+  .characters.find((c) => c.category !== "hero")!.id
+store().addCharacterToStage(fifthNonHeroId)
+check(
+  "addCharacterToStage уважает лимит MAX_STAGE_CHARACTERS",
+  store().activeCharacterIds.length === MAX_STAGE_CHARACTERS
+)
+
+// Сценарий целиком: N=4, все герои на сцене → «Убрать».
+check(
+  "сценарий N=4: после выхода всех героев кнопка была бы «Убрать»",
+  shouldShowRemoveLabel({
+    heroesOnStageCount: heroesOnStage(
+      store().activeCharacterIds,
+      store().characters
+    ).length,
+    totalHeroes: heroCharacters(store().characters).length,
+  }) === true
+)
+
+// Сценарий N<4: в шоу 2 героя, оба на сцене → «Убрать».
+resetSmokeEpisode()
+const onlyTwoHeroes = store()
+  .characters.filter((c) => c.category === "hero")
+  .slice(0, 2)
+// Оставим в шоу ровно двух героев через removeCharacter по остальным.
+store()
+  .characters.filter((c) => c.category === "hero")
+  .slice(2)
+  .forEach((c) => store().removeCharacter(c.id))
+onlyTwoHeroes.forEach((h) => store().addCharacterToStage(h.id))
+check(
+  "сценарий N=2: оба героя на сцене → «Убрать»",
+  shouldShowRemoveLabel({
+    heroesOnStageCount: heroesOnStage(
+      store().activeCharacterIds,
+      store().characters
+    ).length,
+    totalHeroes: heroCharacters(store().characters).length,
+  }) === true
+)
+store().removeCharacterFromStage(onlyTwoHeroes[0].id)
+check(
+  "сценарий N=2: один из двух на сцене → «Команда»",
+  shouldShowRemoveLabel({
+    heroesOnStageCount: heroesOnStage(
+      store().activeCharacterIds,
+      store().characters
+    ).length,
+    totalHeroes: heroCharacters(store().characters).length,
+  }) === false
+)
+resetSmokeEpisode()
+
+// Контракт UI — через ?raw исходника SceneViewport.tsx.
+check(
+  "SceneViewport содержит кнопку с data-command-button и stagger 500 мс",
+  sceneViewportSource.includes("data-command-button") &&
+    sceneViewportSource.includes("HEROES_STAGGER_MS") &&
+    sceneViewportSource.includes("HEROES_STAGGER_MS = 500")
+)
+check(
+  "SceneViewport вызывает add/remove-экшены (а не toggleCharacterOnStage)",
+  sceneViewportSource.includes("addCharacterToStage") &&
+    sceneViewportSource.includes("removeCharacterFromStage") &&
+    // Сам toggle в этом файле не должен использоваться в обработчиках кнопки.
+    !/handleAddHeroes[\s\S]*?toggleCharacterOnStage/.test(
+      sceneViewportSource
+    ) &&
+    !/handleRemoveHeroes[\s\S]*?toggleCharacterOnStage/.test(
+      sceneViewportSource
+    )
+)
+
+// --- Хэдер и тело: одинаковые боковые отступы ---
+// Хэдер компенсирует внутренний px первого Input (px-2.5 = 0.625rem) и
+// последней Button (size="sm" = px-2.5): без компенсации видимый текст
+// шапки сдвинут внутрь относительно «Акт» в теле на 10 px.
+check(
+  "хэдер компенсирует внутренние px детей (calc(1vw …))",
+  /pl-\[calc\(1vw\s*-\s*0\.625rem\)\]/.test(masterPanelSource) &&
+    /pr-\[calc\(1vw\s*-\s*0\.625rem\)\]/.test(masterPanelSource)
+)
+check(
+  "тело сохраняет px-[1vw] без компенсации",
+  masterPanelSource.includes(
+    'className="flex min-h-0 w-full flex-1 px-[1vw] py-4"'
+  )
+)
+// В шапке больше нет чистого px-[1vw] (иначе кто-то откатит фикс).
+const headerBlock =
+  masterPanelSource.match(/<header[\s\S]*?<\/header>/)?.[0] ?? ""
+check(
+  "в блоке хэдера нет сырого px-[1vw]",
+  headerBlock.length > 0 && !/px-\[1vw\]/.test(headerBlock)
+)
+
+// --- Саундпад и плейлист: одна колонка ---
+check(
+  "GlobalAudioSidebar: обе секции в grid-cols-1",
+  (globalAudioSidebarSource.match(/grid w-full min-w-0 grid-cols-1 gap-2 pb-1/g) ?? [])
+    .length === 2
+)
+check(
+  "GlobalAudioSidebar: в файле не осталось grid-cols-2",
+  !globalAudioSidebarSource.includes("grid-cols-2")
+)
+check(
+  "GlobalAudioSidebar: ScrollArea у обеих секций сохранён",
+  (globalAudioSidebarSource.match(/<ScrollArea className="min-h-0 w-full flex-1">/g) ?? [])
+    .length === 2
+)
+
+
+// --- Растяжение превью за нижний край ---
+check(
+  "SceneViewport: ручка ресайза присутствует в разметке",
+  sceneViewportSource.includes("data-viewport-resize") &&
+    sceneViewportSource.includes("cursor-ns-resize")
+)
+check(
+  "SceneViewport: h-[10vh] заменён на inline-style по состоянию",
+  !sceneViewportSource.includes("h-[10vh]") &&
+    /style=\{\{\s*height:\s*`\$\{viewportHeightVh\}vh`/.test(
+      sceneViewportSource
+    )
+)
+check(
+  "SceneViewport: aspect-[4/3] сохраняется (ширина от высоты)",
+  sceneViewportSource.includes("aspect-[4/3]")
+)
+check(
+  "SceneViewport: drag на pointer events с setPointerCapture",
+  sceneViewportSource.includes("setPointerCapture") &&
+    sceneViewportSource.includes("pointermove") &&
+    sceneViewportSource.includes("pointerup") &&
+    sceneViewportSource.includes("pointercancel")
+)
+check(
+  "SceneViewport: клик по ручке не снимает персонажей",
+  sceneViewportSource.includes(
+    "button, [data-scene-player], [data-viewport-resize]"
+  )
+)
+check(
+  "SceneViewport: границы высоты 5–60 vh и старт 10 vh",
+  sceneViewportSource.includes("MIN_VIEWPORT_HEIGHT_VH = 5") &&
+    sceneViewportSource.includes("MAX_VIEWPORT_HEIGHT_VH = 60") &&
+    sceneViewportSource.includes("DEFAULT_VIEWPORT_HEIGHT_VH = 10")
+)
+
+// --- Звук и эффект появления персонажа ---
+resetSmokeEpisode()
+const appearanceChar = store().characters.find((c) => c.category === "hero")!
+
+check(
+  "resolveCharacterAppearance: без настроек — дефолты",
+  (() => {
+    const r = resolveCharacterAppearance(appearanceChar, {
+      id: "default",
+      name: "Обычное",
+      avatarSrc: "",
+      fullBodyPngSrc: "",
+    })
+    return r.soundSrc === "" && r.soundMode === "once" && r.effect === "slide"
+  })()
+)
+
+store().setCharacterAppearance(appearanceChar.id, {
+  soundSrc: "/assets/episodes/x/soundpad/appear.mp3",
+  soundMode: "always",
+  effect: "sharp",
+})
+const afterChar = store().characters.find((c) => c.id === appearanceChar.id)!
+check(
+  "setCharacterAppearance пишет в character.appearance",
+  afterChar.appearance?.soundMode === "always" &&
+    afterChar.appearance?.effect === "sharp" &&
+    afterChar.appearance?.soundSrc === "/assets/episodes/x/soundpad/appear.mp3"
+)
+
+// Состояние переопределяет персонажа частично: только effect, остальное наследуется.
+const overrideStateId = store().addCharacterState(appearanceChar.id, {
+  name: "Раненый",
+  avatarSrc: "",
+  fullBodyPngSrc: "",
+})
+store().setCharacterStateAppearance(appearanceChar.id, overrideStateId, {
+  effect: "slide",
+})
+const withOverride = store().characters.find((c) => c.id === appearanceChar.id)!
+const overrideState = (withOverride.states ?? []).find(
+  (s) => s.id === overrideStateId
+)!
+const resolved = resolveCharacterAppearance(withOverride, overrideState)
+check(
+  "переопределение состояния мержится с настройкой персонажа",
+  resolved.soundSrc === "/assets/episodes/x/soundpad/appear.mp3" &&
+    resolved.soundMode === "always" &&
+    resolved.effect === "slide"
+)
+
+// «Обычное» состояние материализуется при правке через setCharacterStateAppearance
+store().setCharacterStateAppearance(appearanceChar.id, "default", {
+  effect: "sharp",
+})
+check(
+  "setCharacterStateAppearance материализует «Обычное»",
+  store()
+    .characters.find((c) => c.id === appearanceChar.id)!
+    .states?.some((s) => s.id === "default") === true
+)
+
+// Экспорт/импорт сохраняет appearance
+const roundTrip = parseEpisodeFile(JSON.stringify(buildEpisodeFile()))
+store().importEpisode(roundTrip)
+check(
+  "appearance переживает экспорт и импорт",
+  store().characters.find((c) => c.id === appearanceChar.id)?.appearance
+    ?.effect === "sharp"
+)
+
+// Ключи «сыграно» ведут себя как множество, а не как массив с дублями
+store().clearPlayedAppearances()
+store().markAppearancePlayed("char-x:default")
+store().markAppearancePlayed("char-x:default")
+check(
+  "markAppearancePlayed идемпотентен",
+  store().playedAppearanceKeys.length === 1 &&
+    store().playedAppearanceKeys[0] === "char-x:default"
+)
+store().resetEpisode()
+check(
+  "resetEpisode очищает playedAppearanceKeys",
+  store().playedAppearanceKeys.length === 0
+)
+
+
+// --- «sharp» / «slide» через ?raw на SceneStage ---
+check(
+  "SceneStage: SHARP_SCALE = 3 и общий slide снизу для обоих эффектов",
+  sceneStageSource.includes("SHARP_SCALE = 3") &&
+    sceneStageSource.includes("SHARP_START_RATIO") &&
+    sceneStageSource.includes('initial: { y: "100%" }') &&
+    !sceneStageSource.includes("scale: [0.5, 1.15, 1]")
+)
+check(
+  "SceneStage: reads soundRole и playSfx",
+  sceneStageSource.includes('soundRole?: "on" | "off"') &&
+    sceneStageSource.includes("playSfx(appearance.soundSrc)")
+)
+check(
+  "SceneStage: «once» больше не отменяет слайд (ветки initial y:0% нет)",
+  sceneStageSource.includes("const slideProps = {") &&
+    !/initial:\s*\{\s*y:\s*"0%"\s*\}/.test(sceneStageSource)
+)
+check(
+  'SceneViewport передаёт soundRole="on"',
+  sceneViewportSource.includes('soundRole="on"')
+)
+check(
+  'ObsScreen не передаёт soundRole="on"',
+  !obsScreenSource.includes('soundRole="on"')
+)
+
+// --- Экспорт: soundSrc из appearance идёт в список ассетов ---
+// `resetEpisode` даёт пустой выпуск, поэтому персонажей берём из набора смоука.
+resetSmokeEpisode()
+const charWithAppearance = store().characters[0]
+store().setCharacterAppearance(charWithAppearance.id, {
+  soundSrc: "data:audio/mpeg;base64,AAAA",
+})
+const appearanceFile = buildEpisodeFile()
+check(
+  "appearance.soundSrc встраивается в список ассетов выпуска",
+  episodeAssetFields(appearanceFile).some(
+    (f) => f.field === `characters[0].appearance.soundSrc`
+  )
+)
+check(
+  "appearance.soundSrc не попадает в JSON как Base64",
+  !JSON.stringify(appearanceFile).includes("data:audio")
+)
+resetSmokeEpisode()
+
+// --- applyRemoteState со сцены-пустышки очищает playedAppearanceKeys ---
+store().markAppearancePlayed("char-x:default")
+store().applyRemoteState({
+  backgrounds: store().backgrounds,
+  characters: store().characters,
+  activeBackgroundId: null,
+  previousBackgroundId: null,
+  activeCharacterIds: [],
+  mapTokens: [],
+  activeMapId: null,
+  lastRoll: null,
+  lastRollEvent: null,
+  isRollPending: false,
+  videoPlayback: store().videoPlayback,
+})
+check(
+  "applyRemoteState с пустой сценой очищает playedAppearanceKeys",
+  store().playedAppearanceKeys.length === 0
+)
+resetSmokeEpisode()
+
+
+// --- Баг A1: CrossfadeImage не делает fade-in при первом монтировании ---
+check(
+  "CrossfadeImage: settledSrc инициализирован src (без fade-in на mount)",
+  /const \[settledSrc, setSettledSrc\] = useState<string>\(src\)/.test(
+    crossfadeImageSource
+  ) &&
+    // `staleSrc` по-прежнему начинается с null — проверяем именно settledSrc.
+    !/const \[settledSrc, setSettledSrc\] = useState<string \| null>/.test(
+      crossfadeImageSource
+    )
+)
+
+// --- Баг A2: stateChanged не срабатывает ложно ---
+check(
+  "SceneStage: stateChanged использует активный stateId через default-нормализацию",
+  sceneStageSource.includes("DEFAULT_CHARACTER_STATE_ID") &&
+    sceneStageSource.includes("activeStateIdOf") &&
+    // Старый `?? ""` в prevStatesRef должен быть удалён.
+    !/activeStateId \?\? ""/.test(sceneStageSource)
+)
+
+// --- Feature 2: сцена, звук появления ---
+resetSmokeEpisode()
+const sceneWithSound = store().backgrounds[0]
+store().setBackgroundAppearance(sceneWithSound.id, {
+  soundSrc: "/assets/episodes/x/scenes/appear.mp3",
+  soundMode: "always",
+})
+check(
+  "setBackgroundAppearance пишет в background.appearance",
+  store().backgrounds.find((b) => b.id === sceneWithSound.id)?.appearance
+    ?.soundMode === "always"
+)
+
+// Состояние переопределяет сцену частично
+const sceneStateId = store().addBackgroundState(sceneWithSound.id, {
+  name: "Ночь",
+  src: "",
+})
+store().setBackgroundStateAppearance(sceneWithSound.id, sceneStateId, {
+  soundSrc: "",
+})
+const withSceneState = store().backgrounds.find(
+  (b) => b.id === sceneWithSound.id
+)!
+const sceneState = withSceneState.states!.find((s) => s.id === sceneStateId)!
+const resolvedScene = resolveBackgroundAppearance(withSceneState, sceneState)
+check(
+  "resolveBackgroundAppearance: пустой soundSrc у состояния перекрывает сцену",
+  resolvedScene.soundSrc === "" && resolvedScene.soundMode === "always"
+)
+
+// Материализация «Обычного»
+store().setBackgroundStateAppearance(sceneWithSound.id, "default", {
+  soundMode: "once",
+})
+check(
+  "setBackgroundStateAppearance материализует «Обычное»",
+  store()
+    .backgrounds.find((b) => b.id === sceneWithSound.id)!
+    .states?.some((s) => s.id === "default") === true
+)
+
+// Экспорт/импорт с appearance сцены
+store().setBackgroundAppearance(sceneWithSound.id, {
+  soundSrc: "data:audio/mpeg;base64,AAAA",
+})
+const sceneAppearanceFile = buildEpisodeFile()
+check(
+  "appearance.soundSrc сцены идёт в список ассетов",
+  episodeAssetFields(sceneAppearanceFile).some(
+    (f) => f.field === `backgrounds[0].appearance.soundSrc`
+  )
+)
+check(
+  "appearance сцены не попадает в JSON как Base64",
+  !JSON.stringify(sceneAppearanceFile).includes("data:audio")
+)
+const roundTripScene = parseEpisodeFile(JSON.stringify(sceneAppearanceFile))
+store().importEpisode(roundTripScene)
+check(
+  "appearance сцены переживает экспорт и импорт",
+  store().backgrounds[0].appearance?.soundMode === "always"
+)
+
+// Контракт UI: пункт меню в библиотеке сцен
+check(
+  "BackgroundLibrary содержит пункт «Звук появления…»",
+  backgroundLibrarySource.includes("Звук появления") &&
+    backgroundLibrarySource.includes("BackgroundAppearanceDialog")
+)
+
+// soundRole на /screen
+check(
+  "SceneStage: звук сцены играет только при soundRole === 'on'",
+  /soundRole === "on"[\s\S]{0,200}?playSfx\(appearance\.soundSrc\)/.test(
+    sceneStageSource
+  )
+)
+resetSmokeEpisode()
+
+
+// --- Вход персонажа: слайд играет всегда, effect-only skip при once ---
+check(
+  "SceneStage: slideProps без условной ветки (слайд всегда y:100% → 0%)",
+  // Не должно остаться конструкции `shouldSkipEffect ? { initial: { y: "0%" }` рядом со slide
+  !/slideProps\s*=\s*shouldSkipEffect/.test(sceneStageSource) &&
+    !/initial:\s*\{\s*y:\s*"0%"\s*\}\s*,\s*animate:\s*\{\s*y:\s*"0%"\s*\}/.test(
+      sceneStageSource
+    )
+)
+
+check(
+  "SceneStage: StagedCharacter — подкомпонент с замороженным skipEffect",
+  sceneStageSource.includes("function StagedCharacter(") &&
+    sceneStageSource.includes("useState(() =>") &&
+    /useState\(\(\)\s*=>\s*\{[\s\S]{0,300}?playedAppearanceKeys/.test(
+      sceneStageSource
+    ) &&
+    sceneStageSource.includes("useEpisodeStore.getState()")
+)
+
+check(
+  "SceneStage: skipEffect замораживается, isSharp зависит от него",
+  sceneStageSource.includes("const [skipEffect] = useState(") &&
+    sceneStageSource.includes(
+      'const isSharp = appearance.effect === "sharp" && !skipEffect'
+    )
+)
+
+check(
+  "SceneStage: scale-анимация только при isSharp, иначе scale: 1",
+  sceneStageSource.includes("const scaleProps = isSharp") &&
+    sceneStageSource.includes(
+      "initial: { scale: SHARP_SCALE * SHARP_START_RATIO }"
+    )
+)
+
+// Поведенческая проверка: playedAppearanceKeys отмечается, но это не влияет
+// на slide. Проверяем через исходник, что масштаб ≠ 1 только когда isSharp.
+check(
+  "SceneStage: не осталось прямого чтения shouldSkipEffect в slideProps",
+  !/slideProps[\s\S]{0,150}?shouldSkipEffect/.test(sceneStageSource)
+)
+
+
+// --- Кубики: очередь бросков не залипает на долгой сессии ---
+check(
+  "кубики: подготовка движка ограничена по времени (очередь не встанет)",
+  diceOverlaySource.includes("function withTimeout") &&
+    diceOverlaySource.includes("withTimeout(acquireDiceEngine()") &&
+    diceOverlaySource.includes("withTimeout(entry.ready") &&
+    diceOverlaySource.includes("withTimeout(diceBox.updateConfig({ scale })") &&
+    DICE_ENGINE_WAIT_MS >= DICE_ROLL_WATCHDOG_MS
+)
+check(
+  "кубики: сбой подготовки пересобирает движок и отдаёт оценку",
+  diceOverlaySource.includes('resetDiceEngine("подготовка броска не удалась")') &&
+    diceOverlaySource.includes(
+      "postRollResult(event.id, estimate, diceSum(estimate), true)"
+    )
+)
+
+// Длинная серия: каждый бросок получает свой id и свой результат, плашка
+// не копится (таймеры снимаются на каждом шаге).
+resetSmokeEpisode()
+let seriesOk = true
+let lastEventId = 0
+for (let attempt = 0; attempt < 50; attempt += 1) {
+  store().addDie(20)
+  const seriesNotation = buildDiceNotation(store().dicePool)
+  store().triggerDiceRoll(seriesNotation)
+  const event = store().lastRollEvent
+  if (!event || event.id <= lastEventId || store().dicePool.length !== 0) {
+    seriesOk = false
+    break
+  }
+  lastEventId = event.id
+  // Экран отвечает физикой: результат применяется, ожидание снимается.
+  store().completeDiceRoll([{ sides: 20, value: 20 }], 20)
+  if (!store().lastRoll || store().isRollPending) {
+    seriesOk = false
+    break
+  }
+}
+check(
+  "кубики: 50 бросков подряд — у каждого свой id и результат",
+  seriesOk,
+  `последний id: ${lastEventId}`
+)
+store().clearRoll()
+resetSmokeEpisode()
+
 
 if (failures.length > 0) {
   throw new Error(

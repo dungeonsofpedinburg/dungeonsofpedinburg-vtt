@@ -1,4 +1,8 @@
-import type { Background, BackgroundState } from "@/data/types"
+import type {
+  AppearanceSoundMode,
+  Background,
+  BackgroundState,
+} from "@/data/types"
 
 /** id состояния, которое есть у любой сцены: «Обычное». */
 export const DEFAULT_BACKGROUND_STATE_ID = "default"
@@ -74,4 +78,27 @@ export function hasCustomBackgroundStates(background: Background) {
   return (background.states ?? []).some(
     (state) => state.id !== DEFAULT_BACKGROUND_STATE_ID
   )
+}
+
+export type ResolvedBackgroundAppearance = {
+  soundSrc: string
+  soundMode: AppearanceSoundMode
+}
+
+/**
+ * Эффективный звук появления сцены: состояние побеждает сцену, сцена —
+ * значения по умолчанию. Логика та же, что у персонажей
+ * (`resolveCharacterAppearance`): отсутствие поля — «взять уровень выше»,
+ * пустая строка `soundSrc` — осознанное «без звука» на этом уровне.
+ */
+export function resolveBackgroundAppearance(
+  background: Background,
+  state: BackgroundState
+): ResolvedBackgroundAppearance {
+  const override = state.appearance ?? {}
+  const base = background.appearance ?? {}
+  return {
+    soundSrc: override.soundSrc ?? base.soundSrc ?? "",
+    soundMode: override.soundMode ?? base.soundMode ?? "once",
+  }
 }

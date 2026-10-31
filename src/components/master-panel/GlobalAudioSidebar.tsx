@@ -210,7 +210,7 @@ export function GlobalAudioSidebar() {
         </span>
 
         <ScrollArea className="min-h-0 w-full flex-1">
-          <div className="grid w-full min-w-0 grid-cols-2 gap-2 pb-1">
+          <div className="grid w-full min-w-0 grid-cols-1 gap-2 pb-1">
             {soundpad.map((slot) => {
               const Icon = soundpadIcon(slot.icon)
               const isFlashing = slot.id === flashId
@@ -280,7 +280,7 @@ export function GlobalAudioSidebar() {
         </span>
 
         <ScrollArea className="min-h-0 w-full flex-1">
-          <div className="grid w-full min-w-0 grid-cols-2 gap-2 pb-1">
+          <div className="grid w-full min-w-0 grid-cols-1 gap-2 pb-1">
             {tracks.map((track) => {
               const isCurrent = track.id === player.currentId
               const isOver = track.id === overTrackId
@@ -399,7 +399,10 @@ export function GlobalAudioSidebar() {
 
       {/* --- Транспорт: плеер живёт над панелями, здесь только команды --- */}
       <div className="flex shrink-0 flex-col gap-1.5 overflow-hidden">
-        <div className="grid grid-cols-2 gap-1.5">
+        {/* Команды транспорта — те же два столбца 2×2, что и раньше; запись
+            через `1fr_1fr` нужна лишь потому, что плитки секций теперь в одну
+            колонку. */}
+        <div className="grid grid-cols-[1fr_1fr] gap-1.5">
           <Button
             size="icon-sm"
             variant="ghost"

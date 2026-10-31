@@ -1,4 +1,9 @@
-import type { Character, CharacterState } from "@/data/types"
+import type {
+  AppearanceEffect,
+  AppearanceSoundMode,
+  Character,
+  CharacterState,
+} from "@/data/types"
 
 /** Инициалы из имени: «Ингрид Хальс» → «ИХ». */
 export function initialsFromName(name: string) {
@@ -65,4 +70,29 @@ export function hasCustomCharacterStates(character: Character) {
   return (character.states ?? []).some(
     (state) => state.id !== DEFAULT_CHARACTER_STATE_ID
   )
+}
+
+export type ResolvedCharacterAppearance = {
+  soundSrc: string
+  soundMode: AppearanceSoundMode
+  effect: AppearanceEffect
+}
+
+/**
+ * Эффективный звук и эффект появления: переопределение состояния
+ * побеждает настройку персонажа, а та — значения по умолчанию.
+ * Отсутствие поля означает «взять уровень выше»; пустая строка `soundSrc` —
+ * осознанное «без звука» именно на этом уровне.
+ */
+export function resolveCharacterAppearance(
+  character: Character,
+  state: CharacterState
+): ResolvedCharacterAppearance {
+  const override = state.appearance ?? {}
+  const base = character.appearance ?? {}
+  return {
+    soundSrc: override.soundSrc ?? base.soundSrc ?? "",
+    soundMode: override.soundMode ?? base.soundMode ?? "once",
+    effect: override.effect ?? base.effect ?? "slide",
+  }
 }

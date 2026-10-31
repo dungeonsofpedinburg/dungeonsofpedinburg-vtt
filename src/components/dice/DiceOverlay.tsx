@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react"
 import DiceBox from "@3d-dice/dice-box"
 import type { DiceBoxRollResult } from "@3d-dice/dice-box"
 import {
+  DICE_ENGINE_WAIT_MS,
   DICE_PHYSICS,
   DICE_REFERENCE_GEOMETRY,
   DICE_ROLL_WATCHDOG_MS,
@@ -286,6 +287,33 @@ function rollWithWatchdog(diceBox: DiceBox, notation: string[]) {
 }
 
 /**
+ * Промис с ограничением по времени. Нужен там, где библиотека может «зависнуть»
+ * навсегда: `init()` тянет тему и `ammo.wasm` с CDN, `updateConfig()` ждёт
+ * очередь тем. Без таймаута такая заявка держала бы `rollChainRef` вечно —
+ * очередь бросков встала бы, и кубики перестали бы падать до перезагрузки.
+ */
+function withTimeout<T>(promise: Promise<T>, label: string) {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      console.warn(
+        `[Dice] ${label}: шаг не завершился за ${DICE_ENGINE_WAIT_MS} мс — пересобираем движок`
+      )
+      reject(new Error(`${label}: таймаут`))
+    }, DICE_ENGINE_WAIT_MS)
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (error: unknown) => {
+        clearTimeout(timer)
+        reject(error)
+      }
+    )
+  })
+}
+
+/**
  * 3D-кубики Fantastic Dice на сцене.
  * Физику считает только /screen (большой экран OBS), а фактические значения
  * уходят Мастеру обратным каналом — поэтому итог в плашке совпадает в обоих окнах.
@@ -339,8 +367,10 @@ export function DiceOverlay() {
       .then(async () => {
         // Сторожевой таймер: сломанный инстанс (потерянный контекст, ошибка,
         // зависшая физика) пересобирается ДО броска — очередь не встанет.
-        const entry = await acquireDiceEngine()
-        const diceBox = await entry.ready
+        // Все шаги подготовки ограничены по времени: зависший `init()` или
+        // `updateConfig()` иначе держал бы очередь бросков вечно.
+        const entry = await withTimeout(acquireDiceEngine(), "инициализация кубиков")
+        const diceBox = await withTimeout(entry.ready, "готовность кубиков")
         if (rolledEventIdRef.current !== event.id) return
         // Размер подгоняем под количество кубиков: один d20 — почти во всю плашку.
         // updateConfig в dice-box перечитывает тему и метрики, поэтому зовём его
@@ -349,7 +379,7 @@ export function DiceOverlay() {
         // Размер живёт на инстансе: после пересборки он снова не синхронизирован.
         if (entry.scale !== scale) {
           entry.scale = scale
-          await diceBox.updateConfig({ scale })
+          await withTimeout(diceBox.updateConfig({ scale }), "настройка размера кубиков")
           if (rolledEventIdRef.current !== event.id) return
         }
         // Значения берём из результата ИМЕННО этого броска: глобальный
@@ -379,6 +409,13 @@ export function DiceOverlay() {
       })
       .catch((error: unknown) => {
         console.error("[dice] бросок не удался", error)
+        // Движок мог зависнуть на инициализации или смене размера: выбрасываем
+        // инстанс, чтобы следующий бросок поднял его с нуля. Мастеру отдаём
+        // локальную оценку, иначе он ждал бы своего таймаута и видел «пусто».
+        resetDiceEngine("подготовка броска не удалась")
+        if (rolledEventIdRef.current !== event.id) return
+        const estimate = estimateDiceRoll(pool)
+        postRollResult(event.id, estimate, diceSum(estimate), true)
       })
   }, [rollEvent])
 

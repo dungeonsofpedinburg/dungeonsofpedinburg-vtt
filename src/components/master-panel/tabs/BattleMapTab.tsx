@@ -8,10 +8,14 @@ import {
   Plus,
   Trash2,
   Users,
+  Volume2,
   X,
 } from "lucide-react"
 import { BattleMapGrid } from "@/components/master-panel/BattleMapGrid"
-import { AddCharacterStateDialog } from "@/components/master-panel/CharacterDialog"
+import {
+  AddCharacterStateDialog,
+  CharacterAppearanceDialog,
+} from "@/components/master-panel/CharacterDialog"
 import { TokenPanel } from "@/components/master-panel/TokenPanel"
 import {
   tokenCategoryAtPoint,
@@ -100,10 +104,20 @@ export function BattleMapTab() {
   const removeCharacterState = useEpisodeStore(
     (state) => state.removeCharacterState
   )
+  const setCharacterAppearance = useEpisodeStore(
+    (state) => state.setCharacterAppearance
+  )
+  const setCharacterStateAppearance = useEpisodeStore(
+    (state) => state.setCharacterStateAppearance
+  )
 
   const [activeTokenId, setActiveTokenId] = useState<string | null>(null)
   /** Персонаж, которому добавляют новое состояние внешнего вида. */
   const [stateTargetId, setStateTargetId] = useState<string | null>(null)
+  /** Персонаж, которому настраивают звук и эффект появления. */
+  const [appearanceTargetId, setAppearanceTargetId] = useState<string | null>(
+    null
+  )
   /** Выделенные фишки: рамкой на поле или по одной с Shift/Ctrl. */
   const [selectedTokenIds, setSelectedTokenIds] = useState<string[]>([])
   /** Рамка выделения на экране (пиксели от левого верхнего угла поля). */
@@ -112,6 +126,8 @@ export function BattleMapTab() {
 
   const stateTarget =
     characters.find((character) => character.id === stateTargetId) ?? null
+  const appearanceTarget =
+    characters.find((character) => character.id === appearanceTargetId) ?? null
 
   const battlemaps = useMemo(
     () => backgrounds.filter((item) => item.isBattlemap),
@@ -621,6 +637,12 @@ export function BattleMapTab() {
                       ) : null}
                     </ContextMenuSubContent>
                   </ContextMenuSub>
+                  <ContextMenuItem
+                    onSelect={() => setAppearanceTargetId(character.id)}
+                  >
+                    <Volume2 />
+                    Звук и эффект появления…
+                  </ContextMenuItem>
                   <ContextMenuSeparator />
                   <ContextMenuItem
                     variant="destructive"
@@ -774,6 +796,26 @@ export function BattleMapTab() {
         }}
         onSubmit={(state) => {
           if (stateTarget) addCharacterState(stateTarget.id, state)
+        }}
+      />
+      <CharacterAppearanceDialog
+        key={appearanceTargetId ?? "map-appearance-none"}
+        open={Boolean(appearanceTarget)}
+        character={appearanceTarget}
+        onOpenChange={(open) => {
+          if (!open) setAppearanceTargetId(null)
+        }}
+        onSubmit={(result) => {
+          if (!appearanceTarget) return
+          if (result.target === "all") {
+            setCharacterAppearance(appearanceTarget.id, result.patch)
+            return
+          }
+          setCharacterStateAppearance(
+            appearanceTarget.id,
+            result.target.slice("state:".length),
+            result.patch
+          )
         }}
       />
     </div>

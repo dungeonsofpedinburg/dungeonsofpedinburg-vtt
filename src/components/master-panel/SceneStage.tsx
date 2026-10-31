@@ -6,10 +6,21 @@ import { BattleMapGrid } from "@/components/master-panel/BattleMapGrid"
 import { CrossfadeImage, CROSSFADE_MS } from "@/components/master-panel/CrossfadeImage"
 import { Button } from "@/components/ui/button"
 import { backgroundIcon } from "@/data/seed"
-import { backgroundStateSrc, isBackgroundBattlemap } from "@/lib/background"
-import { characterFullBodySrc } from "@/lib/character"
+import {
+  DEFAULT_CHARACTER_STATE_ID,
+  characterFullBodySrc,
+  getCharacterActiveState,
+  resolveCharacterAppearance,
+} from "@/lib/character"
+import {
+  backgroundStateSrc,
+  getBackgroundActiveState,
+  isBackgroundBattlemap,
+  resolveBackgroundAppearance,
+} from "@/lib/background"
 import { ROLL_RESULT_TEXT, formatRollBreakdown } from "@/lib/dice"
 import { isVideoSrc, shouldSeekVideo } from "@/lib/media"
+import { playSfx } from "@/lib/sfx-player"
 import { STAGE_RELAYOUT_MS, STAGE_SLIDE_MS, characterStagePosition } from "@/lib/stage"
 import { useEpisodeStore } from "@/store/useEpisodeStore"
 import { cn } from "@/lib/utils"
@@ -29,6 +40,122 @@ type SceneStageProps = {
    * управляет ровно тем элементом, что видно в превью; на /screen ссылка не нужна.
    */
   videoRef?: RefObject<HTMLVideoElement | null>
+  /**
+   * Звук появления персонажа: "on" — только панель Мастера. На /screen по
+   * умолчанию "off": проектор OBS не должен звучать сам по себе.
+   */
+  soundRole?: "on" | "off"
+}
+
+/**
+ * «Резкий» эффект: картинка персонажа крупнее обычного в 3 раза. Выезд снизу
+ * общий для обоих эффектов, разница — только в этом масштабе.
+ */
+export const SHARP_SCALE = 3
+
+/** Стартовый масштаб резкого эффекта: 40% от финального — «выстрел» снизу. */
+export const SHARP_START_RATIO = 0.4
+
+/**
+ * Одна фигура на сцене: слайд снизу → позиция по горизонтали → масштаб эффекта.
+ *
+ * Живёт отдельным компонентом, потому что решение «эффект уже сыгран» нужно
+ * заморозить на монтировании: `playedAppearanceKeys` обновляется в `useEffect`
+ * родителя уже ПОСЛЕ первого рендера фигуры, и реактивное чтение меняло
+ * `animate` посреди полёта — Framer Motion retarget-ил sharp-анимацию обратно
+ * к `scale: 1` (виден «схлоп»). `useState`-инициализатор выполняется один раз,
+ * поэтому здесь снимок стор-состояния на момент mount-а.
+ */
+function StagedCharacter({
+  character,
+  index,
+  totalCount,
+}: {
+  character: Character
+  index: number
+  totalCount: number
+}) {
+  const activeState = getCharacterActiveState(character)
+  const appearance = resolveCharacterAppearance(character, activeState)
+  const compositeKey = `${character.id}:${activeState.id}`
+
+  const [skipEffect] = useState(() => {
+    const played = useEpisodeStore.getState().playedAppearanceKeys
+    return appearance.soundMode === "once" && played.includes(compositeKey)
+  })
+
+  const isSharp = appearance.effect === "sharp" && !skipEffect
+  const position = characterStagePosition(index, totalCount)
+  const fullBodySrc = characterFullBodySrc(character)
+
+  /*
+   * Выезд снизу — базовая анимация появления, она играет ВСЕГДА: режим "once"
+   * отключает только эффект (масштаб), а не сам слайд.
+   */
+  const slideProps = {
+    initial: { y: "100%" },
+    animate: { y: "0%" },
+    exit: { y: "100%" },
+    transition: { duration: STAGE_SLIDE_MS / 1000, ease: "easeOut" as const },
+  }
+
+  /*
+   * Масштаб: «sharp» — крупный план (в `SHARP_SCALE` раз больше обычного).
+   * Растёт от пола вверх (`origin-bottom`), поэтому видна средняя часть фигуры.
+   */
+  const scaleProps = isSharp
+    ? {
+        initial: { scale: SHARP_SCALE * SHARP_START_RATIO },
+        animate: { scale: SHARP_SCALE },
+        exit: { scale: SHARP_SCALE * SHARP_START_RATIO },
+        transition: {
+          duration: STAGE_SLIDE_MS / 1000,
+          ease: "easeOut" as const,
+        },
+      }
+    : {
+        initial: { scale: 1 },
+        animate: { scale: 1 },
+        exit: { scale: 1 },
+      }
+
+  return (
+    <motion.div
+      className="pointer-events-none absolute inset-0 overflow-hidden"
+      {...slideProps}
+    >
+      {/*
+        Слот фигуры: квадрат по высоте кадра (80%) — ассеты персонажей обычно
+        квадратные PNG, поэтому сторона слота равна его высоте. x: -50%
+        центрирует слот на позиции, position — проценты ширины.
+      */}
+      <motion.div
+        className="absolute bottom-0 aspect-square h-[80%] w-auto"
+        initial={false}
+        animate={{ left: `${position}%`, x: "-50%" }}
+        transition={{ duration: STAGE_RELAYOUT_MS / 1000, ease: "easeInOut" }}
+      >
+        <motion.div className="size-full origin-bottom" {...scaleProps}>
+          {fullBodySrc ? (
+            <CrossfadeImage
+              src={fullBodySrc}
+              alt={character.name}
+              className="pointer-events-none size-full object-contain object-bottom [image-rendering:high-quality]"
+            />
+          ) : (
+            <div className="flex size-full flex-col items-center justify-end rounded-t-full border border-border bg-muted/60 pb-2 text-center">
+              <span className="text-xl font-semibold text-muted-foreground">
+                {character.initials}
+              </span>
+              <span className="mt-1 w-full truncate px-2 text-[10px] text-muted-foreground">
+                {character.name}
+              </span>
+            </div>
+          )}
+        </motion.div>
+      </motion.div>
+    </motion.div>
+  )
 }
 
 /**
@@ -44,6 +171,7 @@ export function SceneStage({
   interactive = false,
   diceRole = "master",
   videoRef,
+  soundRole = "off",
 }: SceneStageProps) {
   const backgrounds = useEpisodeStore((state) => state.backgrounds)
   const activeBackgroundId = useEpisodeStore((state) => state.activeBackgroundId)
@@ -54,6 +182,24 @@ export function SceneStage({
   const activeCharacterIds = useEpisodeStore((state) => state.activeCharacterIds)
   const lastRoll = useEpisodeStore((state) => state.lastRoll)
   const clearRoll = useEpisodeStore((state) => state.clearRoll)
+  const markAppearancePlayed = useEpisodeStore(
+    (state) => state.markAppearancePlayed
+  )
+  const playedAppearanceKeys = useEpisodeStore(
+    (state) => state.playedAppearanceKeys
+  )
+
+  /*
+   * Прошлый кадр сцены: по нему отличаем «персонаж вышел» от «персонаж уже
+   * стоял». `null` — компонент только смонтировался, сравнивать не с чем.
+   */
+  const prevActiveIdsRef = useRef<string[] | null>(null)
+  const prevStatesRef = useRef<Record<string, string>>({})
+  /*
+   * Ключ сцены в эфире (`<id>:<состояние>`): по нему ловим настоящую смену
+   * сцены или её состояния. `null` — компонент только смонтировался.
+   */
+  const prevSceneKeyRef = useRef<string | null>(null)
 
   const background = backgrounds.find((item) => item.id === activeBackgroundId)
 
@@ -68,6 +214,104 @@ export function SceneStage({
       : null
 
   const isCharacterVisible = stagedCharacters.length > 0
+
+  /**
+   * Появление персонажа: сравниваем список сцены с предыдущим кадром. Новый id
+   * или смена активного состояния — это «выход», поэтому здесь играет звук
+   * (только когда `soundRole === "on"`, то есть в панели Мастера) и ставится
+   * отметка «сыграно» для режима "once".
+   *
+   * Отметку ставим в обоих окнах: если в панели уже играли, на /screen эффект
+   * тоже пропускается, и наоборот — «once» ведёт себя одинаково.
+   */
+  useEffect(() => {
+    const isFirstRun = prevActiveIdsRef.current === null
+    const prevIds = prevActiveIdsRef.current ?? []
+    const prevStates = prevStatesRef.current
+
+    /*
+     * Нормализуем id состояния одним правилом: у персонажа без `activeStateId`
+     * это «Обычное». Иначе `undefined !== ""` давал ложную «смену состояния» при
+     * любом изменении списка сцены — и звук с режимом "always" играл на соседей.
+     */
+    const activeStateIdOf = (id: string) => {
+      const character = characters.find((item) => item.id === id)
+      return character?.activeStateId ?? DEFAULT_CHARACTER_STATE_ID
+    }
+
+    if (!isFirstRun) {
+      const added = activeCharacterIds.filter((id) => !prevIds.includes(id))
+      // Смена состояния — тоже появление: «Раненый» выезжает со своим эффектом.
+      const stateChanged = activeCharacterIds.filter((id) => {
+        const prevState = prevStates[id]
+        const current = activeStateIdOf(id)
+        return prevState !== undefined && current !== prevState
+      })
+      const events = new Set([...added, ...stateChanged])
+
+      for (const id of events) {
+        const character = characters.find((c) => c.id === id)
+        if (!character) continue
+        const state = getCharacterActiveState(character)
+        const appearance = resolveCharacterAppearance(character, state)
+        const key = `${character.id}:${state.id}`
+        const hasPlayed = playedAppearanceKeys.includes(key)
+        const isOnce = appearance.soundMode === "once"
+
+        // Звук — только в панели Мастера (soundRole === "on").
+        if (soundRole === "on" && appearance.soundSrc && (!isOnce || !hasPlayed)) {
+          playSfx(appearance.soundSrc)
+        }
+        if (!hasPlayed) markAppearancePlayed(key)
+      }
+    }
+
+    prevActiveIdsRef.current = [...activeCharacterIds]
+    prevStatesRef.current = Object.fromEntries(
+      activeCharacterIds.map((id) => [id, activeStateIdOf(id)])
+    )
+  }, [
+    activeCharacterIds,
+    characters,
+    soundRole,
+    playedAppearanceKeys,
+    markAppearancePlayed,
+  ])
+
+  /**
+   * Появление сцены: сменился эфирный кадр (`activeBackgroundId`) или состояние
+   * активной сцены — играем звук и ставим отметку «сыграно».
+   *
+   * Отличие от персонажей: **первый рендер не звучит**. Уже стоящая сцена при
+   * монтировании — это восстановление кадра (F5 на `/screen`, открытие панели),
+   * а не появление; иначе каждый перезапуск дёргал бы звук.
+   */
+  useEffect(() => {
+    const current = backgrounds.find((item) => item.id === activeBackgroundId)
+    if (!current) return
+    const state = getBackgroundActiveState(current)
+    const key = `${current.id}:${state.id}`
+    const prevKey = prevSceneKeyRef.current
+    prevSceneKeyRef.current = key
+    if (prevKey === key) return
+    if (prevKey === null) return
+
+    const appearance = resolveBackgroundAppearance(current, state)
+    const isOnce = appearance.soundMode === "once"
+    const hasPlayed = playedAppearanceKeys.includes(key)
+
+    // Звук — только в панели Мастера: на /screen `soundRole` = "off".
+    if (soundRole === "on" && appearance.soundSrc && (!isOnce || !hasPlayed)) {
+      playSfx(appearance.soundSrc)
+    }
+    if (!hasPlayed) markAppearancePlayed(key)
+  }, [
+    activeBackgroundId,
+    backgrounds,
+    soundRole,
+    playedAppearanceKeys,
+    markAppearancePlayed,
+  ])
 
   // Слои сцен: уходящая (fade-out) + текущая (fade-in) — тот же приём, что на /screen.
   // Ключ — только id сцены: состояние меняется внутри слоя, чтобы кроссфейд
@@ -128,60 +372,14 @@ export function SceneStage({
         гигантской (особенно в маленьком Viewport Мастера).
       */}
       <AnimatePresence initial={false}>
-        {stagedCharacters.map((character, index) => {
-          const position = characterStagePosition(index, stagedCharacters.length)
-          const fullBodySrc = characterFullBodySrc(character)
-          return (
-            <motion.div
-              key={character.id}
-              className="pointer-events-none absolute inset-0 overflow-hidden"
-              initial={{ y: "100%" }}
-              animate={{ y: "0%" }}
-              exit={{ y: "100%" }}
-              transition={{ duration: STAGE_SLIDE_MS / 1000, ease: "easeOut" }}
-            >
-              {/*
-                Слот фигуры: квадрат по высоте кадра (80%) — ассеты персонажей
-                обычно квадратные PNG, поэтому сторона слота равна его высоте.
-                Ширину не ограничиваем: фигура стоит на «полу» во весь рост, а
-                на 3–4 героях соседние слоты частично перекрываются (так и нужно).
-                x: -50% центрирует слот на позиции, position — проценты ширины.
-
-                Кадр рисуем «в нативном разрешении»: `image-rendering:
-                high-quality` просит браузер не экономить на масштабировании, а
-                CrossfadeImage снимает анимацию проявления после её конца — пока
-                анимация «залита» (fill-mode: both), кадр живёт на отдельном слое
-                композитинга и на проекторе выглядит мыльным.
-              */}
-              <motion.div
-                className="absolute bottom-0 aspect-square h-[80%] w-auto"
-                initial={false}
-                animate={{ left: `${position}%`, x: "-50%" }}
-                transition={{
-                  duration: STAGE_RELAYOUT_MS / 1000,
-                  ease: "easeInOut",
-                }}
-              >
-                {fullBodySrc ? (
-                  <CrossfadeImage
-                    src={fullBodySrc}
-                    alt={character.name}
-                    className="pointer-events-none size-full object-contain object-bottom [image-rendering:high-quality]"
-                  />
-                ) : (
-                  <div className="flex size-full flex-col items-center justify-end rounded-t-full border border-border bg-muted/60 pb-2 text-center">
-                    <span className="text-xl font-semibold text-muted-foreground">
-                      {character.initials}
-                    </span>
-                    <span className="mt-1 w-full truncate px-2 text-[10px] text-muted-foreground">
-                      {character.name}
-                    </span>
-                  </div>
-                )}
-              </motion.div>
-            </motion.div>
-          )
-        })}
+        {stagedCharacters.map((character, index) => (
+          <StagedCharacter
+            key={character.id}
+            character={character}
+            index={index}
+            totalCount={stagedCharacters.length}
+          />
+        ))}
       </AnimatePresence>
 
       {/* 3D-кубики: слой поверх персонажей, а итог броска — на нижней части подложки */}

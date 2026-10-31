@@ -14,7 +14,9 @@ import {
   RefreshCw,
   ScrollText,
   Trash2,
+  Volume2,
 } from "lucide-react"
+import { BackgroundAppearanceDialog } from "@/components/master-panel/BackgroundAppearanceDialog"
 import { AddBackgroundStateDialog } from "@/components/master-panel/BackgroundStateDialog"
 import { BatchSelectionBar } from "@/components/master-panel/BatchSelectionBar"
 import { Badge } from "@/components/ui/badge"
@@ -116,6 +118,12 @@ export function BackgroundLibrary() {
   const removeBackgroundState = useEpisodeStore(
     (state) => state.removeBackgroundState
   )
+  const setBackgroundAppearance = useEpisodeStore(
+    (state) => state.setBackgroundAppearance
+  )
+  const setBackgroundStateAppearance = useEpisodeStore(
+    (state) => state.setBackgroundStateAppearance
+  )
   const addSceneGroup = useEpisodeStore((state) => state.addSceneGroup)
   const renameSceneGroup = useEpisodeStore((state) => state.renameSceneGroup)
   const removeSceneGroup = useEpisodeStore((state) => state.removeSceneGroup)
@@ -141,6 +149,10 @@ export function BackgroundLibrary() {
   const [imageTargetId, setImageTargetId] = useState<string | null>(null)
   /** Сцена, которой добавляют новое состояние фона («Ночь», «Пожар»). */
   const [stateTargetId, setStateTargetId] = useState<string | null>(null)
+  /** Сцена, которой настраивают звук появления. */
+  const [appearanceTargetId, setAppearanceTargetId] = useState<string | null>(
+    null
+  )
   const [isImportingScenes, setIsImportingScenes] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const groupImagesInputRef = useRef<HTMLInputElement>(null)
@@ -154,6 +166,9 @@ export function BackgroundLibrary() {
   /** Сцена, для которой сейчас правят состояния (сравнивается с null). */
   const stateTarget =
     backgrounds.find((item) => item.id === stateTargetId) ?? null
+  /** Сцена, для которой сейчас правят звук появления. */
+  const appearanceTarget =
+    backgrounds.find((item) => item.id === appearanceTargetId) ?? null
 
   function pickSceneImage(backgroundId: string) {
     setImageTargetId(backgroundId)
@@ -794,6 +809,13 @@ export function BackgroundLibrary() {
                           ) : null}
                         </ContextMenuSubContent>
                       </ContextMenuSub>
+                      {/* Звук появления: свой у сцены и у каждого состояния. */}
+                      <ContextMenuItem
+                        onSelect={() => setAppearanceTargetId(background.id)}
+                      >
+                        <Volume2 />
+                        Звук появления…
+                      </ContextMenuItem>
                       <ContextMenuItem
                         onSelect={() => {
                           setRenameTarget({
@@ -932,6 +954,28 @@ export function BackgroundLibrary() {
           }}
           onSubmit={(state) => {
             if (stateTarget) addBackgroundState(stateTarget.id, state)
+          }}
+        />
+
+        {/* Звук появления сцены: общий для всех состояний или своё у состояния. */}
+        <BackgroundAppearanceDialog
+          key={appearanceTargetId ?? "scene-appearance-none"}
+          open={Boolean(appearanceTarget)}
+          background={appearanceTarget}
+          onOpenChange={(open) => {
+            if (!open) setAppearanceTargetId(null)
+          }}
+          onSubmit={(result) => {
+            if (!appearanceTarget) return
+            if (result.target === "all") {
+              setBackgroundAppearance(appearanceTarget.id, result.patch)
+              return
+            }
+            setBackgroundStateAppearance(
+              appearanceTarget.id,
+              result.target.slice("state:".length),
+              result.patch
+            )
           }}
         />
     </div>

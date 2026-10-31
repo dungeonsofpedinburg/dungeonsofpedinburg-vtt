@@ -191,7 +191,14 @@ export function MasterPanel() {
   return (
     <div className="flex min-h-svh flex-col bg-background text-foreground xl:h-svh xl:min-h-0 xl:overflow-hidden">
       <header className="shrink-0 border-b border-border bg-background/95 backdrop-blur">
-        <div className="flex w-full items-center gap-2 px-[1vw] py-3">
+        {/*
+          Боковые отступы шапки компенсируют внутренние `px-2.5` (0.625rem) её
+          крайних детей: у `<Input>` название начинается внутри собственного
+          padding, у кнопки `size="sm"` текст тоже отступает на 10 px от края.
+          Без компенсации видимый текст шапки сдвигался внутрь на 10 px
+          относительно «Акт» в теле, которое живёт на чистом отступе в 1 %.
+        */}
+        <div className="flex w-full items-center gap-2 pl-[calc(1vw-0.625rem)] pr-[calc(1vw-0.625rem)] py-3">
           <Input
             value={episodeTitle}
             onChange={(event) => renameEpisode(event.target.value)}

@@ -300,6 +300,19 @@ export function assetFileName(
 }
 
 /**
+ * Настройки появления (персонажа или сцены): путь к звуку приводим к
+ * `/assets/...`, остальные поля оставляем как есть. Поле `soundSrc` не
+ * добавляем, если его не было: отсутствие — это «унаследовать», а пустая
+ * строка — «без звука».
+ */
+function normalizeAppearance<T extends { soundSrc?: string }>(
+  appearance: T | undefined
+): T | undefined {
+  if (!appearance || appearance.soundSrc === undefined) return appearance
+  return { ...appearance, soundSrc: toAssetUrl(appearance.soundSrc) }
+}
+
+/**
  * Копия файла выпуска, где все пути к ассетам приведены к виду `/assets/...`
  * с прямыми слешами (без букв диска и домашних папок) и к форме NFC. Стор не
  * меняется — маппинг возвращает новые массивы и объекты.
@@ -328,21 +341,27 @@ export function normalizeEpisodeAssets(file: EpisodeFile): EpisodeFile {
     backgrounds: backgrounds.map((item) => ({
       ...item,
       src: toAssetUrl(item.src),
+      // Звук появления сцены — такой же путь выпуска, как её кадры.
+      appearance: normalizeAppearance(item.appearance),
       // Картинки состояний сцены — такие же пути выпуска, как базовый кадр.
       states: (item.states ?? []).map((state) => ({
         ...state,
         src: toAssetUrl(state.src),
+        appearance: normalizeAppearance(state.appearance),
       })),
     })),
     characters: characters.map((item) => ({
       ...item,
       avatarSrc: toAssetUrl(item.avatarSrc),
       fullBodyPngSrc: toAssetUrl(item.fullBodyPngSrc),
+      // Звук появления — такой же путь выпуска, как картинки.
+      appearance: normalizeAppearance(item.appearance),
       // Картинки вариантов внешнего вида — такие же пути выпуска.
       states: (item.states ?? []).map((state) => ({
         ...state,
         avatarSrc: toAssetUrl(state.avatarSrc),
         fullBodyPngSrc: toAssetUrl(state.fullBodyPngSrc),
+        appearance: normalizeAppearance(state.appearance),
       })),
     })),
     tracks: tracks.map((item) => ({

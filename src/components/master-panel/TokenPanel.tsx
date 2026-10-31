@@ -9,10 +9,12 @@ import {
   Plus,
   Tag,
   Trash2,
+  Volume2,
 } from "lucide-react"
 import { BatchSelectionBar } from "@/components/master-panel/BatchSelectionBar"
 import {
   AddCharacterStateDialog,
+  CharacterAppearanceDialog,
   RenameCharacterDialog,
   ReplaceCharacterImageDialog,
 } from "@/components/master-panel/CharacterDialog"
@@ -127,6 +129,12 @@ export function TokenPanel({
   const removeCharacterState = useEpisodeStore(
     (state) => state.removeCharacterState
   )
+  const setCharacterAppearance = useEpisodeStore(
+    (state) => state.setCharacterAppearance
+  )
+  const setCharacterStateAppearance = useEpisodeStore(
+    (state) => state.setCharacterStateAppearance
+  )
   const deleteBatchCharacters = useEpisodeStore(
     (state) => state.deleteBatchCharacters
   )
@@ -140,6 +148,10 @@ export function TokenPanel({
   const [replaceTargetId, setReplaceTargetId] = useState<string | null>(null)
   /** Персонаж, которому добавляют новое состояние внешнего вида. */
   const [stateTargetId, setStateTargetId] = useState<string | null>(null)
+  /** Персонаж, которому настраивают звук и эффект появления. */
+  const [appearanceTargetId, setAppearanceTargetId] = useState<string | null>(
+    null
+  )
   // Точка нажатия: если указатель уехал больше 4 px — это драг, а не клик.
   const pressRef = useRef<{ x: number; y: number } | null>(null)
 
@@ -149,6 +161,8 @@ export function TokenPanel({
     characters.find((character) => character.id === replaceTargetId) ?? null
   const stateTarget =
     characters.find((character) => character.id === stateTargetId) ?? null
+  const appearanceTarget =
+    characters.find((character) => character.id === appearanceTargetId) ?? null
 
   const tokensOnMap = mapId
     ? mapTokens.filter((token) => token.mapId === mapId)
@@ -472,6 +486,13 @@ export function TokenPanel({
                           ) : null}
                         </ContextMenuSubContent>
                       </ContextMenuSub>
+                      {/* Звук и эффект появления: свой для персонажа и состояний. */}
+                      <ContextMenuItem
+                        onSelect={() => setAppearanceTargetId(character.id)}
+                      >
+                        <Volume2 />
+                        Звук и эффект появления…
+                      </ContextMenuItem>
                       {allowCategoryDrag ? null : (
                         <ContextMenuSub>
                           <ContextMenuSubTrigger>
@@ -567,6 +588,26 @@ export function TokenPanel({
         }}
         onSubmit={(state) => {
           if (stateTarget) addCharacterState(stateTarget.id, state)
+        }}
+      />
+      <CharacterAppearanceDialog
+        key={appearanceTargetId ?? "appearance-none"}
+        open={Boolean(appearanceTarget)}
+        character={appearanceTarget}
+        onOpenChange={(open) => {
+          if (!open) setAppearanceTargetId(null)
+        }}
+        onSubmit={(result) => {
+          if (!appearanceTarget) return
+          if (result.target === "all") {
+            setCharacterAppearance(appearanceTarget.id, result.patch)
+            return
+          }
+          setCharacterStateAppearance(
+            appearanceTarget.id,
+            result.target.slice("state:".length),
+            result.patch
+          )
         }}
       />
     </div>

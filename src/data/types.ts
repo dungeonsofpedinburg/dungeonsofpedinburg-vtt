@@ -13,6 +13,37 @@ export type ActGroup = string
 /** Категория токена/персонажа: 4 колонки в панели токенов. */
 export type TokenCategory = "hero" | "npc" | "enemy" | "item"
 
+/** Режим появления: «однажды за сессию» или «всегда». */
+export type AppearanceSoundMode = "once" | "always"
+
+/** Эффект появления персонажа на сцене. */
+export type AppearanceEffect = "slide" | "sharp"
+
+/**
+ * Звук и эффект появления. Поля необязательные — отсутствие означает
+ * «унаследовать» (для состояния — взять с персонажа; для персонажа —
+ * значения по умолчанию). Это тот же паттерн, что у `states[] + activeStateId`.
+ */
+export type CharacterAppearance = {
+  /** Путь к звуку (/assets/episodes/<slug>/soundpad/...) или data-URL. */
+  soundSrc?: string
+  /** Когда проигрывать звук. По умолчанию — "once". */
+  soundMode?: AppearanceSoundMode
+  /** Как выезжает персонаж. По умолчанию — "slide". */
+  effect?: AppearanceEffect
+}
+
+/**
+ * Звук появления сцены. Эффекта здесь нет: смена сцены и её состояния и так
+ * играет кроссфейдом, добавлять к нему ещё и «выезд» незачем.
+ */
+export type BackgroundAppearance = {
+  /** Путь к звуку (/assets/episodes/<slug>/scenes/...) или data-URL. */
+  soundSrc?: string
+  /** Когда проигрывать звук. По умолчанию — "once". */
+  soundMode?: AppearanceSoundMode
+}
+
 /**
  * Вариант внешнего вида сцены: «Обычное», «Ночь», «Пожар», «Разрушенная».
  * У каждого варианта своя картинка (или видео) и свой флаг карты местности —
@@ -25,6 +56,8 @@ export type BackgroundState = {
   src: string
   /** Состояние-карта местности: над фоном рисуется сетка */
   isBattlemap?: boolean
+  /** Звук появления: переопределяет настройку сцены */
+  appearance?: BackgroundAppearance
 }
 
 export type Background = {
@@ -47,6 +80,8 @@ export type Background = {
   states?: BackgroundState[]
   /** Активное состояние сцены: по нему рисуется эфир (см. getBackgroundActiveState) */
   activeStateId?: string
+  /** Звук появления сцены (база для всех её состояний) */
+  appearance?: BackgroundAppearance
 }
 
 /**
@@ -62,6 +97,8 @@ export type CharacterState = {
   avatarSrc: string
   /** Иллюстрация для сцены (полный рост) */
   fullBodyPngSrc: string
+  /** Звук и эффект появления: переопределяет настройку персонажа */
+  appearance?: CharacterAppearance
 }
 
 export type Character = {
@@ -80,6 +117,8 @@ export type Character = {
   states?: CharacterState[]
   /** Активный вариант внешнего вида; нет — «Обычное» */
   activeStateId?: string
+  /** Звук и эффект появления персонажа (база для всех его состояний) */
+  appearance?: CharacterAppearance
   hp?: { current: number; max: number }
 }
 

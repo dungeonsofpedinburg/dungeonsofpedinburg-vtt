@@ -33,6 +33,14 @@ export const ROLL_WAIT_WITH_SCREEN_MS = 15000
  */
 export const DICE_ROLL_WATCHDOG_MS = 7000
 
+/**
+ * Сколько ждём подготовку движка (инициализация, смена размера кубиков) перед
+ * броском. Сторожевой таймер висит только на самом `roll()`; если зависнет
+ * `init()` или `updateConfig()`, очередь бросков встала бы навсегда — кубики
+ * перестают падать, а Мастер видит только число после своего таймаута.
+ */
+export const DICE_ENGINE_WAIT_MS = 20000
+
 /** Сколько ждать итог: экран на связи — ждём физику, иначе считаем локально. */
 export function rollWaitMsFor(screenCount: number) {
   return screenCount > 0 ? ROLL_WAIT_WITH_SCREEN_MS : ROLL_WAIT_MS

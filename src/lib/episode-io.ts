@@ -20,8 +20,10 @@ import {
 import type {
   ActGroup,
   Background,
+  BackgroundAppearance,
   BackgroundState,
   Character,
+  CharacterAppearance,
   CharacterState,
   EpisodeFile,
   GroupTracks,
@@ -281,6 +283,24 @@ function uniqueGroupNames(backgrounds: Background[]) {
   return names
 }
 
+/**
+ * Звук появления сцены из файла выпуска. Как у персонажей: чужие значения
+ * отбрасываем, пустой результат означает «полей нет».
+ */
+function parseBackgroundAppearance(
+  value: unknown
+): BackgroundAppearance | undefined {
+  if (!isRecord(value)) return undefined
+  const appearance: BackgroundAppearance = {}
+  if (typeof value.soundSrc === "string" && value.soundSrc.trim()) {
+    appearance.soundSrc = value.soundSrc
+  }
+  if (value.soundMode === "once" || value.soundMode === "always") {
+    appearance.soundMode = value.soundMode
+  }
+  return Object.keys(appearance).length > 0 ? appearance : undefined
+}
+
 function parseBackgrounds(value: unknown): Background[] {
   if (!Array.isArray(value)) {
     throw new Error("В файле нет массива фонов")
@@ -304,6 +324,8 @@ function parseBackgrounds(value: unknown): Background[] {
     if (states.length > 0) background.states = states
     const activeStateId = asOptionalString(item.activeStateId)
     if (activeStateId) background.activeStateId = activeStateId
+    const appearance = parseBackgroundAppearance(item.appearance)
+    if (appearance) background.appearance = appearance
     return background
   })
 }
@@ -324,8 +346,31 @@ function parseBackgroundStates(value: unknown): BackgroundState[] {
       if (typeof item.isBattlemap === "boolean") {
         state.isBattlemap = item.isBattlemap
       }
+      // Звук появления состояния: нет полей — наследуется от сцены.
+      const appearance = parseBackgroundAppearance(item.appearance)
+      if (appearance) state.appearance = appearance
       return state
     })
+}
+
+/**
+ * Звук и эффект появления из файла выпуска. Неизвестные значения отбрасываем:
+ * в JSON могли оказаться чужие строки, а нам нужны только наши два режима и два
+ * эффекта. Пустой результат означает «полей нет».
+ */
+function parseAppearance(value: unknown): CharacterAppearance | undefined {
+  if (!isRecord(value)) return undefined
+  const appearance: CharacterAppearance = {}
+  if (typeof value.soundSrc === "string" && value.soundSrc.trim()) {
+    appearance.soundSrc = value.soundSrc
+  }
+  if (value.soundMode === "once" || value.soundMode === "always") {
+    appearance.soundMode = value.soundMode
+  }
+  if (value.effect === "slide" || value.effect === "sharp") {
+    appearance.effect = value.effect
+  }
+  return Object.keys(appearance).length > 0 ? appearance : undefined
 }
 
 function parseCharacters(value: unknown): Character[] {
@@ -352,6 +397,8 @@ function parseCharacters(value: unknown): Character[] {
       if (states.length > 0) character.states = states
       const activeStateId = asOptionalString(item.activeStateId)
       if (activeStateId) character.activeStateId = activeStateId
+      const appearance = parseAppearance(item.appearance)
+      if (appearance) character.appearance = appearance
       if (isRecord(item.hp)) {
         character.hp = {
           current: asNumber(item.hp.current),
@@ -368,12 +415,18 @@ function parseCharacterStates(value: unknown): CharacterState[] {
   return value
     .filter(isRecord)
     .slice(0, 24)
-    .map((item, index) => ({
-      id: asString(item.id) || `state-${index}`,
-      name: asString(item.name) || `Состояние ${index + 1}`,
-      avatarSrc: asString(item.avatarSrc),
-      fullBodyPngSrc: asString(item.fullBodyPngSrc),
-    }))
+    .map((item, index) => {
+      const state: CharacterState = {
+        id: asString(item.id) || `state-${index}`,
+        name: asString(item.name) || `Состояние ${index + 1}`,
+        avatarSrc: asString(item.avatarSrc),
+        fullBodyPngSrc: asString(item.fullBodyPngSrc),
+      }
+      // Свои звук и эффект состояния: нет полей — значит наследуются.
+      const appearance = parseAppearance(item.appearance)
+      if (appearance) state.appearance = appearance
+      return state
+    })
 }
 
 function parseTracks(value: unknown): Track[] {

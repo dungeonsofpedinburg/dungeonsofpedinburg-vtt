@@ -1,0 +1,45 @@
+name: Create Release
+
+on:
+  # Ручной запуск: обычный `git push` НЕ создаёт релиз. Релиз появляется
+  # только когда пользователь (или его агент) явно запускает этот workflow
+  # — через веб-интерфейс GitHub или `gh workflow run`.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Номер версии без префикса v (например, 1.0.1)'
+        required: true
+        type: string
+      release_notes:
+        description: 'Описание изменений (ненумерованный список через "- ")'
+        required: true
+        type: string
+
+# Обязательно: без contents: write workflow не сможет создать тег и релиз.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # Нужна полная история: тег ставится на текущий коммит main.
+          fetch-depth: 0
+
+      - name: Create and push tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${{ github.event.inputs.version }}" -m "Release v${{ github.event.inputs.version }}"
+          git push origin "v${{ github.event.inputs.version }}"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ github.event.inputs.version }}" \
+            --title "v${{ github.event.inputs.version }}" \
+            --notes "${{ github.event.inputs.release_notes }}"

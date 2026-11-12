@@ -523,6 +523,56 @@ export async function runAssetServerSmoke() {
     }
   }
 
+  // --- Релизы: workflow + версия в package.json ---
+  // Проверки живут вне try: они не зависят от HTTP-сервера и должны попасть
+  // в отчёт, даже если смоук ассетов упал раньше.
+  const workflowPath = resolve(root, ".github/workflows/release.yml")
+  report(
+    "CI: файл .github/workflows/release.yml существует",
+    existsSync(workflowPath),
+    workflowPath
+  )
+  if (existsSync(workflowPath)) {
+    const workflowSource = readFileSync(workflowPath, "utf8")
+    report(
+      "CI: workflow запускается только вручную (workflow_dispatch), не на push",
+      workflowSource.includes("workflow_dispatch:") &&
+        !/^on:\s*push:/m.test(workflowSource) &&
+        !/^on:\s*pull_request:/m.test(workflowSource),
+      workflowSource.match(/^on:[\s\S]{0,200}/m)?.[0].split("\n")[0] ?? ""
+    )
+    report(
+      "CI: workflow принимает version и release_notes",
+      workflowSource.includes("version:") &&
+        workflowSource.includes("release_notes:")
+    )
+    report(
+      "CI: workflow имеет permissions contents: write",
+      /permissions:\s*\n\s*contents:\s*write/.test(workflowSource)
+    )
+    report(
+      "CI: workflow создаёт тег и релиз через gh",
+      workflowSource.includes("git tag -a") &&
+        workflowSource.includes('git push origin "v${{ github.event.inputs.version }}"') &&
+        workflowSource.includes("gh release create")
+    )
+  }
+
+  const packageJsonPath = resolve(root, "package.json")
+  const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8"))
+  report(
+    "CI: version в package.json = 0.1.0",
+    packageJson.version === "0.1.0",
+    String(packageJson.version)
+  )
+
+  const readmeSource = readFileSync(resolve(root, "README.md"), "utf8")
+  report(
+    "README: есть раздел «Релизы и версионирование»",
+    readmeSource.includes("## Релизы и версионирование") &&
+      readmeSource.includes("/releases/latest")
+  )
+
   return checks
 }
 

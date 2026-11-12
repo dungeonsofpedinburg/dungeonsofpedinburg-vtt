@@ -561,8 +561,8 @@ export async function runAssetServerSmoke() {
   const packageJsonPath = resolve(root, "package.json")
   const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8"))
   report(
-    "CI: version в package.json = 0.1.0",
-    packageJson.version === "0.1.0",
+    "CI: version в package.json = 0.1.1",
+    packageJson.version === "0.1.1",
     String(packageJson.version)
   )
 
@@ -571,6 +571,51 @@ export async function runAssetServerSmoke() {
     "README: есть раздел «Релизы и версионирование»",
     readmeSource.includes("## Релизы и версионирование") &&
       readmeSource.includes("/releases/latest")
+  )
+
+  // --- Кодировка, line endings и .gitattributes для Windows-скриптов ---
+  const batPath = resolve(root, "start_windows.bat")
+  const batBytes = readFileSync(batPath) // Buffer, не строка
+  const batSource = batBytes.toString("utf8")
+
+  report(
+    "start_windows.bat: нет BOM в начале (не «ef bb bf»)",
+    !(batBytes[0] === 0xef && batBytes[1] === 0xbb && batBytes[2] === 0xbf),
+    `первые байты: ${batBytes.slice(0, 3).toString("hex")}`
+  )
+  report(
+    "start_windows.bat: содержит chcp 65001 (UTF-8 в cmd)",
+    batSource.includes("chcp 65001")
+  )
+  report(
+    "start_windows.bat: рабочая копия с CRLF (cmd.exe требует)",
+    batSource.includes("\r\n"),
+    batSource.includes("\r\n") ? "CRLF" : "только LF — cmd.exe сломается"
+  )
+
+  const gitattributesPath = resolve(root, ".gitattributes")
+  report(
+    "CI: .gitattributes существует",
+    existsSync(gitattributesPath),
+    gitattributesPath
+  )
+  if (existsSync(gitattributesPath)) {
+    const ga = readFileSync(gitattributesPath, "utf8")
+    report(
+      "CI: .gitattributes содержит «*.bat text eol=crlf»",
+      /\*\.bat\s+text\s+eol=crlf/.test(ga)
+    )
+    report(
+      "CI: .gitattributes содержит «*.cmd text eol=crlf»",
+      /\*\.cmd\s+text\s+eol=crlf/.test(ga)
+    )
+  }
+
+  const macPath = resolve(root, "start_mac.command")
+  const macSource = readFileSync(macPath, "utf8")
+  report(
+    "start_mac.command: shebang на первой строке и LF-переводы строк",
+    macSource.startsWith("#!/bin/bash") && !macSource.includes("\r\n")
   )
 
   return checks

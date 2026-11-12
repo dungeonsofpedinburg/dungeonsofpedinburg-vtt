@@ -1,0 +1,11 @@
+# Git по умолчанию нормализует текстовые файлы в LF. Для Windows-скриптов
+# это ломает запуск: cmd.exe требует CRLF. Атрибут eol=crlf заставляет Git
+# отдавать файл с CRLF при checkout и в auto-generated ZIP-архивах GitHub.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# macOS-скрипт обязан остаться с LF: CRLF ломает shebang.
+*.command text eol=lf
+
+# Всё остальное — автоопределение, чтобы не портить бинарные файлы
+* text=auto

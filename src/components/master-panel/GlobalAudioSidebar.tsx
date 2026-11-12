@@ -48,11 +48,15 @@ const TRACKS_TOAST_ID = "tracks-add"
 const SLOT_FLASH_MS = 320
 
 /**
- * Общие классы квадратной плитки: звуки саундпада и треки выглядят одинаково —
- * узкая колонка требует одинаковых квадратов, иначе ничего не помещается.
+ * Общие классы компактной плитки: в нижней панели звуки и треки идут
+ * горизонтальными карточками в две колонки, а не квадратами.
  */
 const TILE_CLASS =
-  "flex aspect-square w-full flex-col items-center justify-center gap-1 overflow-hidden rounded-lg border border-border bg-card px-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+  "flex min-h-14 w-full items-center gap-2 overflow-hidden rounded-lg border border-border bg-muted/40 px-2 py-2 text-left text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+
+/** Квадратная плитка прежней одноколоночной панели (режим section="all"). */
+const LEGACY_TILE_CLASS =
+  "flex aspect-square w-full flex-col items-center justify-center overflow-hidden rounded-lg border border-border bg-card px-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
 
 /**
  * Глобальная аудио-панель: закреплена справа и видна при любой открытой вкладке.
@@ -63,7 +67,13 @@ const TILE_CLASS =
  * переключении вкладок; эффекты играет модуль `@/lib/sfx-player` — у него свои
  * `<audio>`, и звук не перебивает саундтрек.
  */
-export function GlobalAudioSidebar() {
+export type GlobalAudioSection = "all" | "soundpad" | "playlist"
+
+export function GlobalAudioSidebar({
+  section = "all",
+}: {
+  section?: GlobalAudioSection
+}) {
   const tracks = useEpisodeStore((state) => state.tracks)
   const soundpad = useEpisodeStore((state) => state.soundpad)
   const addSoundpadSlot = useEpisodeStore((state) => state.addSoundpadSlot)
@@ -79,6 +89,10 @@ export function GlobalAudioSidebar() {
   const removeTrack = useEpisodeStore((state) => state.removeTrack)
 
   const player = useSoundtrack()
+
+  // В общей панели плитки остаются прежними квадратами, в нижней строке —
+  // компактные горизонтальные карточки.
+  const tileClass = section === "all" ? LEGACY_TILE_CLASS : TILE_CLASS
 
   const [isCreatingSfx, setIsCreatingSfx] = useState(false)
   const [editingSfxId, setEditingSfxId] = useState<string | null>(null)
@@ -194,23 +208,28 @@ export function GlobalAudioSidebar() {
   }
 
   return (
-    /*
-     * Панель зажата по ширине: `min-w-0 overflow-hidden` не даёт квадратным
-     * плиткам распирать колонку в 8% — всё, что не влезает, обрезается внутри
-     * своей плитки (`truncate` у названий), а не растягивает панель.
-     * Высота делится строго 70/30 между саундпадом и плейлистом, у каждого свой
-     * скролл; транспорт внизу — вне дележа.
-     */
     <aside className="flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden pr-0.5 pl-2">
-      {/* --- Саундпад: одноразовые эффекты (70% высоты панели) --- */}
-      <div className="flex min-h-0 flex-[7] flex-col gap-1.5 overflow-hidden">
+      {/* --- Саундпад: одноразовые эффекты --- */}
+      {section !== "playlist" ? (
+      <div
+        className={
+          section === "all"
+            ? "flex min-h-0 flex-[7] flex-col gap-1.5 overflow-hidden"
+            : "flex min-h-0 flex-1 flex-col gap-1.5 overflow-hidden"
+        }
+      >
         <span className="flex shrink-0 items-center gap-1 text-[10px] font-medium tracking-wide text-muted-foreground uppercase">
           <Volume2 className="size-3" />
           Звуки
         </span>
 
         <ScrollArea className="min-h-0 w-full flex-1">
-          <div className="grid w-full min-w-0 grid-cols-1 gap-2 pb-1">
+          <div
+            className={cn(
+              "grid w-full min-w-0 grid-cols-1 gap-2 pb-1",
+              section !== "all" && "grid-cols-[repeat(2,minmax(0,1fr))]"
+            )}
+          >
             {soundpad.map((slot) => {
               const Icon = soundpadIcon(slot.icon)
               const isFlashing = slot.id === flashId
@@ -223,13 +242,13 @@ export function GlobalAudioSidebar() {
                       title={slot.title}
                       onClick={() => handlePlaySfx(slot)}
                       className={cn(
-                        TILE_CLASS,
+                        tileClass,
                         isFlashing &&
-                          "border-primary bg-accent text-foreground ring-2 ring-primary"
+                          "border-ring bg-accent text-foreground ring-2 ring-ring"
                       )}
                     >
-                      <Icon className="size-5 shrink-0" />
-                      <span className="w-full truncate px-1 text-center text-[11px] text-muted-foreground">
+                      <Icon className="size-4 shrink-0" />
+                      <span className="min-w-0 flex-1 truncate text-xs">
                         {slot.title}
                       </span>
                     </button>
@@ -262,25 +281,39 @@ export function GlobalAudioSidebar() {
               onClick={() => setIsCreatingSfx(true)}
               title="Добавить звук"
               aria-label="Добавить звук"
-              className={cn(TILE_CLASS, "border-2 border-dashed")}
+              className={cn(tileClass, "justify-center border-2 border-dashed")}
             >
               <Plus className="size-5" />
             </button>
           </div>
         </ScrollArea>
       </div>
+      ) : null}
 
-      <Separator className="my-2 shrink-0" />
+      {section === "all" ? <Separator className="my-2 shrink-0" /> : null}
 
-      {/* --- Плейлист (30% высоты панели): плитки те же, что у звуков --- */}
-      <div className="flex min-h-0 flex-[3] flex-col gap-1.5 overflow-hidden">
+      {/* --- Плейлист: плитки те же, что у звуков --- */}
+      {section !== "soundpad" ? (
+      <>
+      <div
+        className={
+          section === "all"
+            ? "flex min-h-0 flex-[3] flex-col gap-1.5 overflow-hidden"
+            : "flex min-h-0 flex-1 flex-col gap-1.5 overflow-hidden"
+        }
+      >
         <span className="flex shrink-0 items-center gap-1 text-[10px] font-medium tracking-wide text-muted-foreground uppercase">
           <Music className="size-3" />
           Музыка
         </span>
 
         <ScrollArea className="min-h-0 w-full flex-1">
-          <div className="grid w-full min-w-0 grid-cols-1 gap-2 pb-1">
+          <div
+            className={cn(
+              "grid w-full min-w-0 grid-cols-1 gap-2 pb-1",
+              section !== "all" && "grid-cols-[repeat(2,minmax(0,1fr))]"
+            )}
+          >
             {tracks.map((track) => {
               const isCurrent = track.id === player.currentId
               const isOver = track.id === overTrackId
@@ -316,14 +349,14 @@ export function GlobalAudioSidebar() {
                         title={track.title}
                         onClick={() => handlePlayTrack(track)}
                         className={cn(
-                          TILE_CLASS,
+                          tileClass,
                           // Играющий трек подсвечен и мягко пульсирует рамкой.
                           isCurrent &&
                             player.isPlaying &&
-                            "animate-pulse border-primary text-foreground ring-2 ring-primary",
+                            "animate-pulse border-ring text-foreground ring-2 ring-ring",
                           isCurrent &&
                             !player.isPlaying &&
-                            "border-primary text-foreground"
+                            "border-ring text-foreground"
                         )}
                       >
                         {track.coverSrc ? (
@@ -331,15 +364,20 @@ export function GlobalAudioSidebar() {
                             src={track.coverSrc}
                             alt={track.title}
                             draggable={false}
-                            // В двухколоночной сетке плитка узкая: обложка
-                            // меньше, чтобы название не вылезало за края.
-                            className="size-6 shrink-0 rounded object-cover"
+                            className="size-10 shrink-0 rounded-lg object-cover"
                           />
                         ) : (
-                          <Music className="size-5 shrink-0" />
+                          <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-card">
+                            <Music className="size-4 shrink-0" />
+                          </span>
                         )}
-                        <span className="w-full truncate px-1 text-center text-[11px] text-muted-foreground">
-                          {track.title}
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-xs font-medium text-foreground">
+                            {track.title}
+                          </span>
+                          <span className="block truncate text-[10px] text-muted-foreground">
+                            {track.artist || "Без исполнителя"} · {track.duration}
+                          </span>
                         </span>
                       </button>
                     </div>
@@ -376,15 +414,14 @@ export function GlobalAudioSidebar() {
               title="Добавить треки"
               aria-label="Добавить треки"
               className={cn(
-                TILE_CLASS,
-                "border-2 border-dashed disabled:opacity-60"
+                tileClass,
+                "justify-center border-2 border-dashed disabled:opacity-60"
               )}
             >
               <Plus className="size-5" />
             </button>
           </div>
         </ScrollArea>
-      </div>
 
       <input
         ref={mp3InputRef}
@@ -395,14 +432,19 @@ export function GlobalAudioSidebar() {
         onChange={handleTracksPicked}
       />
 
-      <Separator className="my-2 shrink-0" />
+      {section === "all" ? <Separator className="my-2 shrink-0" /> : null}
 
       {/* --- Транспорт: плеер живёт над панелями, здесь только команды --- */}
       <div className="flex shrink-0 flex-col gap-1.5 overflow-hidden">
-        {/* Команды транспорта — те же два столбца 2×2, что и раньше; запись
-            через `1fr_1fr` нужна лишь потому, что плитки секций теперь в одну
-            колонку. */}
-        <div className="grid grid-cols-[1fr_1fr] gap-1.5">
+        {/* Команды транспорта: в общей панели 2×2, в нижней строке — в один ряд. */}
+        <div
+          className={cn(
+            "grid gap-1.5",
+            section === "all"
+              ? "grid-cols-[1fr_1fr]"
+              : "grid-cols-[repeat(4,minmax(0,1fr))]"
+          )}
+        >
           <Button
             size="icon-sm"
             variant="ghost"
@@ -468,6 +510,9 @@ export function GlobalAudioSidebar() {
           {player.current?.title ?? "Плейлист пуст"}
         </span>
       </div>
+      </div>
+      </>
+      ) : null}
 
       {/* Диалоги пересоздаются при смене записи: поля не «переезжают» между ними. */}
       <SoundpadSlotDialog

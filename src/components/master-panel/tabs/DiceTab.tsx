@@ -1,20 +1,16 @@
-import { Dices, RotateCcw, Sparkles } from "lucide-react"
+import { RotateCcw } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import {
-  Card,
-  CardContent,
-  CardFooter,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
-import { ScrollArea } from "@/components/ui/scroll-area"
-import { Separator } from "@/components/ui/separator"
 import { dice } from "@/data/content"
 import { buildDiceNotation } from "@/lib/dice"
 import { MAX_DICE_PER_TYPE, useEpisodeStore } from "@/store/useEpisodeStore"
 import { cn } from "@/lib/utils"
 
+/**
+ * Кубики в нижней панели: шесть круглых кнопок с иконками из `public/dice/`,
+ * компактная зона пула и крупная кнопка броска. Логика прежняя: физику считает
+ * `/screen`, здесь только выбор пула и запуск события.
+ */
 export function DiceTab() {
   const dicePool = useEpisodeStore((state) => state.dicePool)
   const lastRoll = useEpisodeStore((state) => state.lastRoll)
@@ -23,123 +19,99 @@ export function DiceTab() {
   const removeDie = useEpisodeStore((state) => state.removeDie)
   const clearDicePool = useEpisodeStore((state) => state.clearDicePool)
   const triggerDiceRoll = useEpisodeStore((state) => state.triggerDiceRoll)
-  // Идёт бросок: ждём физику с /screen (флаг сбрасывает стор).
-  const isRolling = isRollPending
 
   return (
-    <ScrollArea className="h-full pr-1">
-      <div className="flex flex-col gap-3 pr-3">
-      <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
+    <div className="flex h-full min-h-0 flex-col gap-2">
+      <div className="grid shrink-0 grid-cols-6 gap-2">
         {dice.map((die) => {
           const count = dicePool.filter((item) => item === die).length
           const isFull = count >= MAX_DICE_PER_TYPE
 
           return (
-            <Button
+            <button
               key={die}
-              size="lg"
-              variant={count > 0 ? "default" : "secondary"}
+              type="button"
               title="ЛКМ — добавить кубик, ПКМ — убрать"
-              className={cn(
-                "relative h-12 text-sm font-semibold select-none",
-                isFull && "opacity-80"
-              )}
               onClick={() => addDie(die)}
               onContextMenu={(event) => {
                 event.preventDefault()
                 removeDie(die)
               }}
+              className={cn(
+                "relative flex h-12 items-center justify-center rounded-full border transition-colors select-none",
+                count > 0
+                  ? "border-ring bg-accent"
+                  : "border-border bg-muted/40 hover:bg-accent",
+                isFull && "opacity-80"
+              )}
             >
-              d{die}
+              <img
+                src={`/dice/d${die}.svg`}
+                alt={`d${die}`}
+                draggable={false}
+                className="size-7 invert"
+              />
               {count > 0 ? (
-                <Badge
-                  variant="secondary"
-                  className="absolute -top-1.5 -right-1.5"
-                >
+                <span className="absolute -top-1 -right-1 flex size-4 items-center justify-center rounded-full bg-ring text-[10px] font-semibold text-background">
                   {count}
-                </Badge>
+                </span>
               ) : null}
-            </Button>
+            </button>
           )
         })}
       </div>
 
-      <div className="min-h-28 rounded-lg border border-dashed border-border bg-muted/20 p-3">
-        <div className="mb-2 flex items-center justify-between gap-2">
-          <span className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-            <Sparkles className="size-3.5" />
-            Staging area
-          </span>
-          <Badge variant="ghost">{dicePool.length} кубиков</Badge>
-        </div>
-
-        {dicePool.length === 0 ? (
-          <p className="py-4 text-center text-xs text-muted-foreground">
-            Зона пуста. ЛКМ по кубику — добавить, ПКМ — убрать.
-          </p>
-        ) : (
-          <div className="flex flex-wrap gap-1.5">
-            {dicePool.map((die, index) => (
+      <div className="flex min-h-0 flex-1 items-center gap-2 rounded-lg border border-dashed border-border bg-muted/30 px-3 py-2">
+        <span className="shrink-0 text-[10px] font-medium tracking-wide text-muted-foreground uppercase">
+          Staging
+        </span>
+        <div className="flex min-w-0 flex-1 flex-wrap gap-1.5">
+          {dicePool.length === 0 ? (
+            <span className="text-xs text-muted-foreground">
+              ЛКМ по кубику — добавить, ПКМ — убрать
+            </span>
+          ) : (
+            dicePool.map((die, index) => (
               <span
                 key={`${die}-${index}`}
-                className="flex size-10 items-center justify-center rounded-md border border-border bg-card text-xs font-semibold"
+                className="flex size-8 items-center justify-center rounded-lg border border-border bg-card text-[11px] font-semibold"
               >
                 d{die}
               </span>
-            ))}
-          </div>
-        )}
+            ))
+          )}
+        </div>
+        <Badge variant="ghost" className="shrink-0">
+          {dicePool.length}
+        </Badge>
       </div>
 
-      <Card size="sm" className="mt-auto shrink-0 gap-3">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Dices className="size-4 text-muted-foreground" />
-            Бросок{dicePool.length > 0 ? ` · ${dicePool.length} кубиков` : ""}
-          </CardTitle>
-        </CardHeader>
-
-        <CardContent className="space-y-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <span className="text-xs text-muted-foreground">
-              Кубики летят на экране OBS, итог возвращается в плашку
-            </span>
-            {lastRoll ? (
-              <Badge variant="outline">Прошлый итог: {lastRoll.sum}</Badge>
-            ) : null}
-          </div>
-
-          <Separator />
-
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              size="lg"
-              className="h-12 flex-1 gap-2 text-sm font-semibold tracking-wide uppercase"
-              disabled={dicePool.length === 0 || isRolling}
-              onClick={() => triggerDiceRoll(buildDiceNotation(dicePool))}
-            >
-              <Dices className="size-5" />
-              {isRolling ? "Кубики летят…" : "LET'S ROLL"}
-            </Button>
-            <Button
-              size="lg"
-              variant="outline"
-              className="h-12"
-              disabled={dicePool.length === 0}
-              onClick={clearDicePool}
-            >
-              <RotateCcw />
-              Очистить
-            </Button>
-          </div>
-        </CardContent>
-
-        <CardFooter className="justify-between gap-2 text-xs text-muted-foreground">
-          <span>Физику считает /screen — числа совпадают у Мастера и в OBS.</span>
-          <span>до {MAX_DICE_PER_TYPE} кубиков каждого типа</span>
-        </CardFooter>
-      </Card>
+      <div className="flex shrink-0 items-center gap-2">
+        <Button
+          size="lg"
+          variant="secondary"
+          disabled={dicePool.length === 0 || isRollPending}
+          onClick={() => triggerDiceRoll(buildDiceNotation(dicePool))}
+          className="h-14 flex-1 rounded-lg font-heading text-xl font-bold tracking-wide uppercase"
+        >
+          {isRollPending ? "Кубики летят…" : "LET'S ROLL"}
+        </Button>
+        <Button
+          size="icon-lg"
+          variant="outline"
+          aria-label="Очистить пул кубиков"
+          title="Очистить пул"
+          disabled={dicePool.length === 0 || isRollPending}
+          onClick={clearDicePool}
+        >
+          <RotateCcw />
+        </Button>
       </div>
-    </ScrollArea>
+
+      <div className="flex shrink-0 items-center justify-between text-[10px] text-muted-foreground">
+        <span>до {MAX_DICE_PER_TYPE} кубиков каждого типа</span>
+        {lastRoll ? <span>Прошлый итог: {lastRoll.sum}</span> : null}
+      </div>
+    </div>
   )
 }

@@ -571,7 +571,7 @@ export function BackgroundLibrary() {
               </Button>
             </div>
 
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 2xl:grid-cols-4">
+            <div className="grid grid-cols-2 gap-2">
               {group.items.map((background) => {
                 const Icon = backgroundIcon(background.id)
                 const isActive = background.id === activeBackgroundId
@@ -635,7 +635,7 @@ export function BackgroundLibrary() {
                         className={cn(
                           "group relative flex aspect-[4/3] w-full items-center justify-center overflow-hidden rounded-lg border bg-muted/40 transition-colors hover:bg-muted",
                           isActive
-                            ? "border-ring ring-2 ring-ring/40"
+                            ? "border-foreground ring-2 ring-foreground/20"
                             : "border-border",
                           isDragging && "opacity-60",
                           isOver && !dragGroup && "ring-2 ring-ring",

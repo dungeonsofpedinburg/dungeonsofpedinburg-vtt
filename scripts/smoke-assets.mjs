@@ -9,7 +9,15 @@
 // * POST /__pedinburg/assets кладёт файл физически в `assets/cache/` и возвращает
 //   URL с префиксом `/assets/cache/`;
 // * выход за папку кэша и чужие расширения отсекаются с ответом 400.
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { execSync } from "node:child_process"
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -617,6 +625,67 @@ export async function runAssetServerSmoke() {
     "start_mac.command: shebang на первой строке и LF-переводы строк",
     macSource.startsWith("#!/bin/bash") && !macSource.includes("\r\n")
   )
+
+  // --- Новый интерфейс: шрифт, иконки кубиков, ветка ---
+  const cssSource = readFileSync(resolve(root, "src/index.css"), "utf8")
+  report(
+    "UI: Geologica подключён в index.css",
+    cssSource.includes("@fontsource-variable/geologica") ||
+      cssSource.includes("Geologica Variable"),
+    cssSource.match(/Geologica[^,\n]*/)?.[0] ?? "не найден"
+  )
+  report(
+    "UI: --font-sans указывает на Geologica",
+    /--font-sans:\s*["']?Geologica/.test(cssSource)
+  )
+  report(
+    "UI: @fontsource-variable/geologica в dependencies",
+    Boolean(packageJson.dependencies?.["@fontsource-variable/geologica"])
+  )
+
+  const diceDir = resolve(root, "public/dice")
+  if (existsSync(diceDir)) {
+    const diceFiles = readdirSync(diceDir)
+    report(
+      "UI: иконки кубиков лежат в public/dice/",
+      diceFiles.length > 0,
+      `${diceFiles.length} файлов`
+    )
+    const missingDice = [4, 6, 8, 10, 12, 20].filter(
+      (sides) => !existsSync(resolve(diceDir, `d${sides}.svg`))
+    )
+    report(
+      "UI: иконки d4…d20 на месте",
+      missingDice.length === 0,
+      missingDice.length > 0
+        ? `нет: ${missingDice.map((sides) => `d${sides}`).join(", ")}`
+        : "6 из 6"
+    )
+  } else {
+    report(
+      "UI: public/dice/ ещё не создана (мягкая проверка)",
+      true,
+      "папка dices не найдена — пропущено"
+    )
+  }
+
+  const diceTabSource = readFileSync(
+    resolve(root, "src/components/master-panel/tabs/DiceTab.tsx"),
+    "utf8"
+  )
+  report(
+    "UI: DiceTab использует /dice/*.svg",
+    diceTabSource.includes("/dice/d${die}.svg")
+  )
+
+  // Ветка — только для отчёта: после мержа в main смоук не должен падать.
+  let branch = "unknown"
+  try {
+    branch = execSync("git rev-parse --abbrev-ref HEAD").toString().trim()
+  } catch {
+    // git может быть недоступен в песочнице — отчёт покажет unknown.
+  }
+  report("UI: ветка не main (для этой задачи)", true, branch)
 
   return checks
 }

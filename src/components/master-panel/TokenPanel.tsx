@@ -195,7 +195,7 @@ export function TokenPanel({
 
       <div
         className={cn(
-          isIcons ? "flex flex-wrap gap-1.5" : "grid grid-cols-4"
+          isIcons ? "flex flex-nowrap gap-2 overflow-x-auto pb-1" : "grid grid-cols-4"
         )}
       >
       {tokenCategories.map((category, index) => {
@@ -336,7 +336,7 @@ export function TokenPanel({
                           "border-2 select-none touch-none",
                           isIcons
                             ? cn(
-                                "relative size-11 shrink-0 cursor-pointer overflow-hidden rounded-md bg-card transition-colors",
+                                "relative size-12 shrink-0 cursor-pointer overflow-hidden rounded-full bg-card transition-colors",
                                 categoryBorders[character.category][
                                   isSelected ? "selected" : "base"
                                 ]
@@ -356,7 +356,7 @@ export function TokenPanel({
                           // Персонаж на сцене: золотая рамка (до четырёх сразу).
                           isOnStage &&
                             !batchSelected &&
-                            "ring-2 ring-amber-500 ring-offset-2 ring-offset-background"
+                            "ring-2 ring-foreground ring-offset-2 ring-offset-background"
                         )}
                       >
                     {isIcons ? (

@@ -29,7 +29,14 @@ const DEFAULT_VIEWPORT_HEIGHT_VH = 10
  * работают). Плеер управляет тем же `<video>`, что стоит на сцене, поэтому
  * пауза и перемотка в превью видны сразу.
  */
-export function SceneViewport() {
+type SceneViewportProps = {
+  /** Стартовая высота кадра в vh: в новой раскладке центр выше прежних 10vh. */
+  initialHeightVh?: number
+}
+
+export function SceneViewport({
+  initialHeightVh = DEFAULT_VIEWPORT_HEIGHT_VH,
+}: SceneViewportProps) {
   const backgrounds = useEpisodeStore((state) => state.backgrounds)
   const activeBackgroundId = useEpisodeStore((state) => state.activeBackgroundId)
   const characters = useEpisodeStore((state) => state.characters)
@@ -61,11 +68,9 @@ export function SceneViewport() {
    * снапшот она не уходит. Меряем не `getBoundingClientRect()` (сцена на
    * /screen масштабируется transform-ом), а храним целевую высоту в vh.
    */
-  const [viewportHeightVh, setViewportHeightVh] = useState(
-    DEFAULT_VIEWPORT_HEIGHT_VH
-  )
+  const [viewportHeightVh, setViewportHeightVh] = useState(initialHeightVh)
   const startYRef = useRef(0)
-  const startHeightRef = useRef(DEFAULT_VIEWPORT_HEIGHT_VH)
+  const startHeightRef = useRef(initialHeightVh)
   const [isResizing, setIsResizing] = useState(false)
 
   const background = backgrounds.find((item) => item.id === activeBackgroundId)
@@ -231,8 +236,8 @@ export function SceneViewport() {
   }
 
   return (
-    <div className="flex flex-col gap-2">
-      <div className="flex min-w-0 items-center gap-2">
+    <div className="flex h-full flex-col justify-center gap-2">
+      <div className="flex min-w-0 items-center gap-2 px-1">
         <span className="text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
           {background?.actGroup ?? "Сцена"}
         </span>
@@ -291,7 +296,7 @@ export function SceneViewport() {
           if (activeCharacterIds.length > 0) clearStage()
         }}
         className={cn(
-          "group flex w-full flex-col items-center gap-2 rounded-lg border border-border bg-muted/40 py-2",
+          "group flex w-full flex-col items-center gap-2",
           activeCharacterIds.length > 0 ? "cursor-pointer" : "cursor-default"
         )}
       >
@@ -326,8 +331,8 @@ export function SceneViewport() {
             <span
               aria-hidden
               className={cn(
-                "pointer-events-none h-1 w-10 rounded-full bg-zinc-400/70 transition-colors",
-                isResizing ? "bg-zinc-100" : "group-hover:bg-zinc-300/80"
+                "pointer-events-none h-1 w-10 rounded-full bg-foreground/40 transition-colors",
+                isResizing ? "bg-foreground" : "group-hover:bg-foreground/70"
               )}
             />
           </div>
@@ -341,7 +346,7 @@ export function SceneViewport() {
         {isVideo && background ? (
           <div
             data-scene-player
-            className="flex w-full items-center gap-2 rounded-md border border-border bg-background/90 px-2 py-1"
+            className="flex w-full items-center gap-2 rounded-lg border border-border bg-card px-2 py-1"
           >
             <Button
               size="icon-sm"

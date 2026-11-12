@@ -1,15 +1,14 @@
 import { useCallback, useRef, useState } from "react"
 import type { ChangeEvent } from "react"
-import { useDefaultLayout } from "react-resizable-panels"
 import {
   ChevronDown,
+  Clapperboard,
   Dices,
   Download,
   ExternalLink,
   FolderOpen,
   Grid3x3,
   RotateCcw,
-  ScrollText,
   Upload,
 } from "lucide-react"
 import { BackgroundLibrary } from "@/components/master-panel/BackgroundLibrary"
@@ -34,7 +33,6 @@ import {
 } from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Card } from "@/components/ui/card"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -42,13 +40,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Input } from "@/components/ui/input"
-import {
-  ResizableHandle,
-  ResizablePanel,
-  ResizablePanelGroup,
-} from "@/components/ui/resizable"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { useEpisodeSync } from "@/hooks/useEpisodeSync"
 import { useTabNumberShortcuts } from "@/hooks/useTabNumberShortcuts"
@@ -58,11 +50,13 @@ import {
   readEpisodeFile,
 } from "@/lib/episode-io"
 import { describeAssetIssues } from "@/lib/export-episode"
+import { cn } from "@/lib/utils"
 import { useEpisodeStore } from "@/store/useEpisodeStore"
 import { toast } from "sonner"
 
-/** Вкладки правой панели: этот же порядок соответствует клавишам 1–3. */
-const TAB_IDS = ["scenes", "map", "dice"]
+/** Два режима центральной области: сцена и карта. Клавиши 1–2. */
+const VIEW_IDS = ["scene", "map"] as const
+type CenterView = (typeof VIEW_IDS)[number]
 
 /** Сколько имён выгруженных файлов показывать в диалоге экспорта. */
 const EXPORT_ASSET_LIST_LIMIT = 5
@@ -84,10 +78,11 @@ export function MasterPanel() {
 
   const [isResetOpen, setIsResetOpen] = useState(false)
   const [isCreateOpen, setIsCreateOpen] = useState(false)
-  const [activeTab, setActiveTab] = useState(TAB_IDS[0])
+  const [centerView, setCenterView] = useState<CenterView>("scene")
   /**
    * Сообщение о работе с файлом выпуска: ошибка импорта/экспорта или памятка о
-   * том, что папку `assets` нужно передать вместе с JSON (тогда она одна на оба окна).
+   * том, что папку `assets` нужно передать вместе с JSON (тогда она одна на оба
+   * окна).
    */
   const [fileDialog, setFileDialog] = useState<{
     title: string
@@ -95,18 +90,11 @@ export function MasterPanel() {
   } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  // Клавиши 1–4 переключают вкладки: setActiveTab стабилен, слушатель один.
-  const selectTabByIndex = useCallback((index: number) => {
-    setActiveTab(TAB_IDS[index] ?? TAB_IDS[0])
+  // Клавиши 1–2 переключают «Сцена / Карта»: setCenterView стабилен.
+  const selectViewByIndex = useCallback((index: number) => {
+    setCenterView(VIEW_IDS[index] ?? VIEW_IDS[0])
   }, [])
-  useTabNumberShortcuts(selectTabByIndex)
-
-  // Пропорция панелей запоминается в localStorage между перезагрузками.
-  const { defaultLayout, onLayoutChanged } = useDefaultLayout({
-    id: "pedinburg-master-split",
-    panelIds: ["left", "center", "audio"],
-    onlySaveAfterUserInteractions: true,
-  })
+  useTabNumberShortcuts(selectViewByIndex)
 
   const liveBackground = backgrounds.find(
     (item) => item.id === activeBackgroundId
@@ -138,14 +126,11 @@ export function MasterPanel() {
   /**
    * Экспорт выпуска. Картинки и музыка ложатся файлами в папку выпуска
    * `assets/episodes/<slug>/` (их кладёт локальный сервер), поэтому JSON весит
-   * килобайты и несёт только относительные пути. Папку архивируют целиком и
-   * передают Мастеру вместе с этим JSON.
+   * килобайты и несёт только относительные пути.
    */
   async function handleExport() {
     try {
       const report = await downloadEpisodeFile()
-      // Статус — тостом: он исчезнет сам. Памятку о передаче папки оставляем
-      // диалогом: три шага с именами файлов в тосте читать неудобно.
       toast.success("Выпуск экспортирован", {
         description: `${report.fileName} — ${report.size}. Файлы: assets/episodes/${report.episodeSlug}/`,
       })
@@ -158,7 +143,6 @@ export function MasterPanel() {
           description: describeAssetIssues(report.issues),
         })
       }
-      // Имён файлов может быть много: в диалоге показываем первые пять.
       const shown = report.savedAssets.slice(0, EXPORT_ASSET_LIST_LIMIT)
       const rest = report.savedAssets.length - shown.length
       const saved =
@@ -190,27 +174,33 @@ export function MasterPanel() {
 
   return (
     <div className="flex min-h-svh flex-col bg-background text-foreground xl:h-svh xl:min-h-0 xl:overflow-hidden">
-      <header className="shrink-0 border-b border-border bg-background/95 backdrop-blur">
+      <header className="shrink-0 border-b border-border bg-background">
         {/*
-          Боковые отступы шапки компенсируют внутренние `px-2.5` (0.625rem) её
-          крайних детей: у `<Input>` название начинается внутри собственного
-          padding, у кнопки `size="sm"` текст тоже отступает на 10 px от края.
-          Без компенсации видимый текст шапки сдвигался внутрь на 10 px
-          относительно «Акт» в теле, которое живёт на чистом отступе в 1 %.
+          Боковые отступы компенсируют внутренние `px-2.5` крайних детей шапки,
+          чтобы видимый текст начинался на одной вертикали с телом (1vw).
         */}
-        <div className="flex w-full items-center gap-2 pl-[calc(1vw-0.625rem)] pr-[calc(1vw-0.625rem)] py-3">
-          <Input
-            value={episodeTitle}
-            onChange={(event) => renameEpisode(event.target.value)}
-            placeholder="Название выпуска"
-            aria-label="Название выпуска"
-            className="h-8 w-72 border-transparent bg-transparent text-sm font-medium shadow-none dark:bg-transparent"
-          />
+        <div className="flex w-full items-center gap-3 py-3 pl-[calc(1vw-0.625rem)] pr-[calc(1vw-0.625rem)]">
+          <div className="flex size-11 shrink-0 items-center justify-center rounded-xl border border-border bg-card text-foreground">
+            <Dices className="size-5" />
+          </div>
+
+          <div className="flex min-w-0 flex-col">
+            <Input
+              value={episodeTitle}
+              onChange={(event) => renameEpisode(event.target.value)}
+              placeholder="Название выпуска"
+              aria-label="Название выпуска"
+              className="h-8 w-64 border-transparent bg-transparent px-0 font-heading text-lg font-bold shadow-none dark:bg-transparent"
+            />
+            <span className="px-0.5 text-[10px] font-medium tracking-wide text-muted-foreground uppercase">
+              Мастер-панель
+            </span>
+          </div>
 
           {/* Куда лягут ассеты выпуска: папку передают Мастеру целиком. */}
           <Badge
             variant="outline"
-            className="shrink-0 font-mono"
+            className="hidden shrink-0 font-mono md:inline-flex"
             title={`Папка выпуска: assets/episodes/${episodeSlug}/`}
           >
             Папка: {episodeSlug}
@@ -244,12 +234,16 @@ export function MasterPanel() {
             </DropdownMenuContent>
           </DropdownMenu>
 
-          <div className="ml-auto flex items-center gap-1.5">
+          <span className="hidden text-xs text-muted-foreground xl:inline">
+            Приключение
+          </span>
+
+          <div className="ml-auto flex items-center gap-2">
             <SyncStatusDot />
             <Button size="sm" variant="outline" asChild>
               <a href="/screen" target="_blank" rel="noreferrer">
                 <ExternalLink />
-                Экран OBS
+                Зрительский экран
               </a>
             </Button>
           </div>
@@ -258,106 +252,103 @@ export function MasterPanel() {
 
       <SoundtrackProvider>
       <main className="flex min-h-0 w-full flex-1 px-[1vw] py-4">
-        <ResizablePanelGroup
-          orientation="horizontal"
-          defaultLayout={defaultLayout}
-          onLayoutChanged={onLayoutChanged}
-          className="min-h-0"
-        >
-        {/* Левая панель (35%): закреплён только viewport, токены скроллятся вместе с библиотекой */}
-        <ResizablePanel
-          id="left"
-          defaultSize="35%"
-          minSize="20%"
-          maxSize="70%"
-          className="flex min-h-0 flex-col gap-4"
-        >
-          <div className="shrink-0">
-            <SceneViewport />
+        <div className="flex min-h-0 w-full flex-1 flex-col gap-4">
+          <div className="grid min-h-0 flex-1 grid-cols-[minmax(300px,360px)_minmax(0,1fr)_minmax(300px,360px)] gap-4">
+            {/* Левая колонка: библиотека сцен */}
+            <section className="flex min-h-0 flex-col rounded-lg border border-border bg-card p-3">
+              <div className="mb-2 flex shrink-0 items-center justify-between">
+                <span className="text-[10px] font-medium tracking-wide text-muted-foreground uppercase">
+                  Сцены
+                </span>
+                <Badge variant="outline">{backgrounds.length}</Badge>
+              </div>
+              <ScrollArea className="min-h-0 flex-1 pr-1">
+                <BackgroundLibrary />
+              </ScrollArea>
+            </section>
+
+            {/* Центр: персонажи, сцена/карта */}
+            <section className="flex min-h-0 flex-col gap-3">
+              <div className="shrink-0 rounded-lg border border-border bg-card p-2">
+                <TokenPanel
+                  mapId={tokenPanelMapId}
+                  variant="icons"
+                  allowCategoryDrag={false}
+                  selectedCharacterId={activeCharacterIds.at(-1) ?? null}
+                  onCreate={() => setIsCreateOpen(true)}
+                  className="w-full"
+                />
+              </div>
+
+              <div className="flex min-h-0 flex-1 flex-col rounded-lg border border-border bg-card p-3">
+                <div className="mb-2 flex shrink-0 items-center justify-between gap-2">
+                  <div className="flex items-center gap-1 rounded-lg border border-border bg-muted/40 p-1">
+                    <button
+                      type="button"
+                      onClick={() => setCenterView("scene")}
+                      className={cn(
+                        "flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
+                        centerView === "scene"
+                          ? "bg-foreground text-background"
+                          : "text-muted-foreground hover:text-foreground"
+                      )}
+                    >
+                      <Clapperboard className="size-3.5" />
+                      Сцена
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setCenterView("map")}
+                      className={cn(
+                        "flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
+                        centerView === "map"
+                          ? "bg-foreground text-background"
+                          : "text-muted-foreground hover:text-foreground"
+                      )}
+                    >
+                      <Grid3x3 className="size-3.5" />
+                      Карта
+                    </button>
+                  </div>
+                  <span
+                    className="min-w-0 truncate text-[10px] font-medium tracking-wide text-muted-foreground uppercase"
+                    title={liveBackground?.title}
+                  >
+                    {liveBackground?.title ?? "Сцена не выбрана"}
+                  </span>
+                </div>
+
+                <div className="min-h-0 flex-1 overflow-hidden">
+                  {centerView === "scene" ? (
+                    <SceneViewport initialHeightVh={48} />
+                  ) : (
+                    <BattleMapTab />
+                  )}
+                </div>
+              </div>
+            </section>
+
+            {/* Правая колонка: заметки акта */}
+            <section className="min-h-0 rounded-lg border border-border bg-card p-3">
+              <SceneDescriptionTab />
+            </section>
           </div>
 
-          {/* Панель персонажей закреплена: скроллится только библиотека сцен */}
-          <div className="shrink-0">
-            <TokenPanel
-              mapId={tokenPanelMapId}
-              variant="icons"
-              allowCategoryDrag={false}
-              // «Выбранным» считаем последнего вышедшего на сцену: остальные
-              // подсвечиваются золотой рамкой прямо в рельсе.
-              selectedCharacterId={activeCharacterIds.at(-1) ?? null}
-              onCreate={() => setIsCreateOpen(true)}
-            />
+          {/* Нижняя строка: звуки, кубики, музыка */}
+          <div className="grid h-[240px] shrink-0 grid-cols-[2fr_1fr_2fr] gap-4">
+            <section className="min-h-0 rounded-lg border border-border bg-card p-3">
+              <GlobalAudioSidebar section="soundpad" />
+            </section>
+            <section className="min-h-0 rounded-lg border border-border bg-card p-3">
+              <DiceTab />
+            </section>
+            <section className="min-h-0 rounded-lg border border-border bg-card p-3">
+              <div className="min-w-[85px] overflow-hidden" style={{ height: "100%" }}>
+                <GlobalAudioSidebar section="playlist" />
+              </div>
+            </section>
           </div>
-
-          <ScrollArea className="min-h-0 flex-1 pr-1">
-            <div className="pr-3">
-              <BackgroundLibrary />
-            </div>
-          </ScrollArea>
-        </ResizablePanel>
-
-        <ResizableHandle withHandle className="mx-2" />
-
-        {/* Центральная панель (57%): у каждой вкладки свой внутренний скролл */}
-        <ResizablePanel
-          id="center"
-          defaultSize="57%"
-          minSize="25%"
-          maxSize="90%"
-          className="flex min-h-0 flex-col"
-        >
-          <Card className="flex min-h-0 flex-1 flex-col gap-3 px-(--card-spacing)">
-            <Tabs
-              value={activeTab}
-              onValueChange={setActiveTab}
-              className="min-h-0 flex-1 gap-3"
-            >
-              <TabsList className="w-full shrink-0">
-                <TabsTrigger value="scenes" title="Клавиша 1">
-                  <ScrollText />
-                  <span className="hidden md:inline">Описание сцен</span>
-                </TabsTrigger>
-                <TabsTrigger value="map" title="Клавиша 2">
-                  <Grid3x3 />
-                  <span className="hidden md:inline">Карты местности</span>
-                </TabsTrigger>
-                <TabsTrigger value="dice" title="Клавиша 3">
-                  <Dices />
-                  <span className="hidden md:inline">Кубики</span>
-                </TabsTrigger>
-              </TabsList>
-
-              <TabsContent value="scenes" className="min-h-0">
-                <SceneDescriptionTab />
-              </TabsContent>
-              <TabsContent value="map" className="min-h-0">
-                <BattleMapTab />
-              </TabsContent>
-              <TabsContent value="dice" className="min-h-0">
-                <DiceTab />
-              </TabsContent>
-            </Tabs>
-          </Card>
-        </ResizablePanel>
-
-        <ResizableHandle withHandle className="mx-2" />
-
-        {/*
-          Правая панель (8%): глобальная аудио-панель. Она видна при любой
-          вкладке, поэтому музыка и эффекты всегда под рукой. min-w-[85px] держит
-          квадратные плитки читаемыми на узких экранах, а min-w-0/overflow-hidden
-          запрещают содержимому растянуть колонку шире своей доли.
-        */}
-        <ResizablePanel
-          id="audio"
-          defaultSize="8%"
-          minSize="5%"
-          maxSize="20%"
-          className="min-w-[85px] overflow-hidden"
-        >
-          <GlobalAudioSidebar />
-        </ResizablePanel>
-        </ResizablePanelGroup>
+        </div>
       </main>
       </SoundtrackProvider>
 
@@ -407,7 +398,6 @@ export function MasterPanel() {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>{fileDialog?.title}</AlertDialogTitle>
-            {/* whitespace-pre-line: памятка по экспорту — нумерованный список. */}
             <AlertDialogDescription className="whitespace-pre-line">
               {fileDialog?.message}
             </AlertDialogDescription>

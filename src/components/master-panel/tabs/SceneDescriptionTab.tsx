@@ -9,7 +9,6 @@ import {
 } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { Separator } from "@/components/ui/separator"
 import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
 import { useEpisodeStore } from "@/store/useEpisodeStore"
@@ -61,7 +60,7 @@ export function SceneDescriptionTab() {
   }
 
   return (
-    <div className="grid h-full min-h-0 gap-3 lg:grid-cols-[5vw_minmax(0,1fr)]">
+    <div className="grid h-full min-h-0 grid-cols-[84px_minmax(0,1fr)] gap-3">
       <ScrollArea className="h-full min-h-0">
         <div className="flex flex-col gap-1.5 pr-1">
           <span
@@ -90,8 +89,8 @@ export function SceneDescriptionTab() {
                 title={`${group} · сцен: ${count}${hasNote ? " · заметка есть" : ""}${hasTrack ? " · есть музыка" : ""}`}
                 onClick={() => setSelectedGroup(group)}
                 className={cn(
-                  "flex w-full flex-col gap-1 rounded-lg border border-border bg-muted/30 px-1.5 py-1.5 text-left transition-colors hover:bg-muted",
-                  isSelected && "border-primary bg-muted ring-2 ring-primary"
+                  "flex w-full flex-col gap-1 rounded-lg border border-transparent px-1.5 py-1.5 text-left transition-colors hover:bg-muted/50",
+                  isSelected && "border-border bg-muted/60"
                 )}
               >
                 <span className="flex items-center gap-1 text-[9px] text-muted-foreground">
@@ -114,7 +113,7 @@ export function SceneDescriptionTab() {
         </div>
       </ScrollArea>
 
-      <Card size="sm" className="flex min-h-0 flex-col gap-3">
+      <Card size="sm" className="flex min-h-0 flex-col gap-3 bg-transparent ring-0">
         <CardHeader>
           <div className="flex flex-wrap items-center gap-2">
             <Input
@@ -163,7 +162,7 @@ export function SceneDescriptionTab() {
               if (activeGroup) updateGroupNote(activeGroup, event.target.value)
             }}
             disabled={!activeGroup}
-            className="min-h-32 flex-1 resize-none"
+            className="min-h-24 flex-1 resize-none"
             placeholder="Заметки мастера по акту: цели, проверки, таймеры, противники…"
           />
 
@@ -175,14 +174,6 @@ export function SceneDescriptionTab() {
             <Badge variant="outline">{wordCount} слов</Badge>
             <Badge variant="ghost">Автосохранение</Badge>
           </div>
-
-          <Separator />
-
-          <p className="text-xs text-muted-foreground">
-            Заметка относится ко всему акту: сцены одного акта живут под одной
-            записью, а листать акты можно не меняя эфир. Музыку акта привязывают
-            на разделителе в библиотеке слева — «+» рядом с названием.
-          </p>
         </CardContent>
       </Card>
     </div>

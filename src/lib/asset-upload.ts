@@ -20,6 +20,15 @@ export function setAssetUploadBaseUrl(base: string) {
   uploadBaseUrl = base.replace(/\/+$/, "")
 }
 
+/**
+ * Базовый адрес сервера выгрузки. Нужен экспорту, чтобы скачать ассет старого
+ * slug в Node-смоуке: в браузере база пустая и `fetch("/assets/...")` идёт на
+ * тот же origin, а в SSR относительный URL не разрешается.
+ */
+export function getAssetUploadBaseUrl() {
+  return uploadBaseUrl
+}
+
 /** Итог выгрузки: либо относительный URL, либо причина отказа сервера. */
 export type AssetUploadResult =
   | { ok: true; url: string }

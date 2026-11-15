@@ -9,7 +9,7 @@ import {
   isSystemPath,
   toAssetUrl,
 } from "@/lib/asset-url"
-import { saveAssetToLibrary } from "@/lib/asset-upload"
+import { getAssetUploadBaseUrl, saveAssetToLibrary } from "@/lib/asset-upload"
 import type {
   CharacterState,
   EpisodeFile,
@@ -342,12 +342,26 @@ export function describeAssetIssues(issues: AssetIssue[]) {
 }
 
 /**
+ * Blob → data-URL для повторной выгрузки файла, приехавшего из старой папки
+ * выпуска. `btoa` есть и в браузере, и в Node 18+ (нужен SSR-смоуку).
+ */
+async function blobToDataUrl(blob: Blob) {
+  const bytes = new Uint8Array(await blob.arrayBuffer())
+  let binary = ""
+  const chunkSize = 0x8000
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize))
+  }
+  return `data:${blob.type || "application/octet-stream"};base64,${btoa(binary)}`
+}
+
+/**
  * Выгружает встроенные ассеты в папку выпуска `assets/episodes/<slug>/` и
  * заменяет data-URL на относительный путь `/assets/episodes/<slug>/...`. Из
  * браузера записать файл на диск нельзя, поэтому файлы кладёт локальный сервер
  * Vite/Express — тот же, что раздаёт `assets/` по URL (см. `@/lib/asset-upload`).
- * Относительные значения не трогаем: файлы постоянных выпусков перезаписи не
- * требуют.
+ * Готовый URL из папки старого slug (выпуск переименовали после привязки)
+ * скачивается и перезаливается в текущую папку.
  *
  * Папка выпуска — то, что Продюсер передаёт Мастеру: папку архивируют целиком,
  * поэтому все медиа выпуска оказываются внутри неё, а не в общем кэше.
@@ -360,6 +374,8 @@ export async function persistEpisodeAssets(file: EpisodeFile, episodeSlug: strin
   const issues: AssetIssue[] = []
   /** Папка выпуска для медиапапки: `scenes` → `episodes/<slug>/scenes`. */
   const inEpisode = (folder: string) => episodeAssetFolder(episodeSlug, folder)
+  /** Текущий slug: по нему понимаем, надо ли переносить файл из старой папки. */
+  const currentSlug = generateEpisodeSlug(episodeSlug)
 
   const persist = async (
     field: string,
@@ -368,17 +384,65 @@ export async function persistEpisodeAssets(file: EpisodeFile, episodeSlug: strin
     label: string,
     value: string
   ) => {
-    if (!isInlineAsset(value)) return value
-    const fileName = assetFileName(id, label, extensionFromDataUrl(value))
-    const upload = await saveAssetToLibrary(folder, fileName, value)
-    if (!upload.ok) {
-      // Сервер отказал (слишком большой файл, недоступен) — ассет в JSON не
-      // попадёт, поле останется пустым, а причина уйдёт в отчёт `issues`.
-      issues.push({ field, reason: "inline", sample: sampleOf(value) })
-      return ""
+    const raw = (value ?? "").trim()
+    if (!raw) return ""
+
+    // 1. Встроенный файл: выгружаем в папку выпуска, как и раньше.
+    if (isInlineAsset(raw)) {
+      const fileName = assetFileName(id, label, extensionFromDataUrl(raw))
+      const upload = await saveAssetToLibrary(folder, fileName, raw)
+      if (!upload.ok) {
+        // Сервер отказал (слишком большой файл, недоступен) — ассет в JSON не
+        // попадёт, поле останется пустым, а причина уйдёт в отчёт `issues`.
+        issues.push({ field, reason: "inline", sample: sampleOf(raw) })
+        return ""
+      }
+      saved.push(upload.url)
+      return upload.url
     }
-    saved.push(upload.url)
-    return upload.url
+
+    // 2. Готовый URL: если он из папки другого slug (выпуск переименовали
+    // после привязки), скачиваем файл и кладём в текущую папку.
+    const url = toAssetUrl(raw)
+    if (!isAssetLibraryPath(url)) return url
+
+    const match = /^\/assets\/episodes\/([^/]+)\//.exec(url)
+    if (!match) return url
+    const oldSlug = match[1]
+    if (!oldSlug || oldSlug === currentSlug) return url
+
+    try {
+      const sourceUrl = `${getAssetUploadBaseUrl()}${url}`
+      const response = await fetch(sourceUrl)
+      if (!response.ok) {
+        issues.push({
+          field,
+          reason: "inline",
+          sample: sampleOf(`${url} (нет файла старого выпуска ${oldSlug})`),
+        })
+        return url
+      }
+      const dataUrl = await blobToDataUrl(await response.blob())
+      const fileName = assetFileName(id, label, extensionFromDataUrl(dataUrl))
+      const upload = await saveAssetToLibrary(folder, fileName, dataUrl)
+      if (!upload.ok) {
+        issues.push({
+          field,
+          reason: "inline",
+          sample: sampleOf(`${url} (не удалось перезалить из ${oldSlug})`),
+        })
+        return url
+      }
+      saved.push(upload.url)
+      return upload.url
+    } catch {
+      issues.push({
+        field,
+        reason: "inline",
+        sample: sampleOf(`${url} (не удалось перенести из ${oldSlug})`),
+      })
+      return url
+    }
   }
 
   const backgrounds = await Promise.all(
@@ -404,7 +468,7 @@ export async function persistEpisodeAssets(file: EpisodeFile, episodeSlug: strin
                     ? {
                         soundSrc: await persist(
                           `backgrounds[${index}].states[${stateIndex}].appearance.soundSrc`,
-                          inEpisode(ASSET_FOLDERS.scenes),
+                          inEpisode(ASSET_FOLDERS.soundpad),
                           `${item.id}-${state.id}-appear`,
                           `${item.title} ${state.name} появление`,
                           state.appearance.soundSrc
@@ -427,7 +491,7 @@ export async function persistEpisodeAssets(file: EpisodeFile, episodeSlug: strin
                   ? {
                       soundSrc: await persist(
                         `backgrounds[${index}].appearance.soundSrc`,
-                        inEpisode(ASSET_FOLDERS.scenes),
+                        inEpisode(ASSET_FOLDERS.soundpad),
                         `${item.id}-appear`,
                         `${item.title} появление`,
                         item.appearance.soundSrc

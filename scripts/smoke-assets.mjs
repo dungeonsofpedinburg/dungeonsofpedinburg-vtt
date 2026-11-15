@@ -54,7 +54,13 @@ const EPISODE_UPLOAD = "test.png"
 /** Выпуск для полного экспорта из стора: название и его slug. */
 const FULL_EXPORT_SLUG = "smoke-export"
 /** Все папки выпусков, которые создаёт смоук: их убираем после прогона. */
-const SMOKE_EPISODE_SLUGS = [EPISODE_SLUG, FULL_EXPORT_SLUG]
+const SMOKE_EPISODE_SLUGS = [
+  EPISODE_SLUG,
+  FULL_EXPORT_SLUG,
+  "smoke-sounds",
+  "new-slug",
+  "old-slug",
+]
 
 /** URL из сегментов пути: кириллица и пробелы уезжают в процентном анкодинге. */
 function assetUrl(segments) {
@@ -480,6 +486,132 @@ export async function runAssetServerSmoke() {
         servedInline?.status === 200,
       `${fullReport.fileName} · ${inlineSrc}`
     )
+
+    // --- Экспорт: звуки сцены, состояния и трек группы ---
+    const appearanceExport = await exportModule.persistEpisodeAssets(
+      {
+        campaign: "Смоук-звуки",
+        backgrounds: [
+          {
+            id: "bg-appear",
+            title: "Сцена со звуком",
+            src: SMOKE_PNG,
+            actGroup: "Завязка",
+            isBattlemap: false,
+            appearance: { soundSrc: SMOKE_PNG, soundMode: "once" },
+            states: [
+              {
+                id: "state-appear",
+                name: "Ночь",
+                src: SMOKE_PNG,
+                appearance: { soundSrc: SMOKE_PNG, soundMode: "always" },
+              },
+            ],
+          },
+        ],
+        characters: [],
+        tracks: [],
+        soundpad: [],
+        groupTracks: {
+          Завязка: { id: "grp-appear", title: "Тема акта", src: SMOKE_PNG },
+        },
+        mapTokens: [],
+        sceneNotes: {},
+      },
+      "smoke-sounds"
+    )
+
+    const exportBg = appearanceExport.file.backgrounds[0]
+    const exportState = exportBg.states[0]
+    const exportGroupSrc = appearanceExport.file.groupTracks["Завязка"]?.src ?? ""
+
+    report(
+      "экспорт: звук появления сцены выгружен в soundpad/",
+      exportBg.appearance?.soundSrc?.startsWith(
+        "/assets/episodes/smoke-sounds/soundpad/"
+      ) === true,
+      String(exportBg.appearance?.soundSrc)
+    )
+    report(
+      "экспорт: звук появления состояния сцены выгружен в soundpad/",
+      exportState.appearance?.soundSrc?.startsWith(
+        "/assets/episodes/smoke-sounds/soundpad/"
+      ) === true,
+      String(exportState.appearance?.soundSrc)
+    )
+    report(
+      "экспорт: трек группы выгружен в music/",
+      exportGroupSrc.startsWith("/assets/episodes/smoke-sounds/music/"),
+      exportGroupSrc
+    )
+
+    // Файлы физически на диске
+    const filesToCheck = [
+      exportBg.appearance?.soundSrc,
+      exportState.appearance?.soundSrc,
+      exportGroupSrc,
+    ].filter((url) => typeof url === "string" && url.startsWith("/assets/episodes/"))
+    for (const url of filesToCheck) {
+      const abs = resolve(episodesRoot, url.slice(EPISODES_URL.length))
+      report(
+        `экспорт: файл ${url} лежит на диске`,
+        existsSync(abs),
+        abs
+      )
+      if (existsSync(abs)) uploadedFiles.push(abs)
+    }
+
+    // JSON не содержит Base64
+    const appearanceJson = JSON.stringify(appearanceExport.file)
+    report(
+      "экспорт: звуки сцены и треки групп — без Base64 в JSON",
+      !appearanceJson.includes("data:image") &&
+        !appearanceJson.includes("data:audio")
+    )
+
+    // --- Миграция: URL с чужим slug копируется в текущий ---
+    // Кладём файл в "old-slug" руками, чтобы проверить миграцию в текущий.
+    const oldSlugDir = resolve(episodesRoot, "old-slug", "music")
+    mkdirSync(oldSlugDir, { recursive: true })
+    const oldTrackPath = resolve(oldSlugDir, "theme.mp3")
+    writeFileSync(oldTrackPath, Buffer.from("old-track-bytes"))
+    uploadedFiles.push(oldTrackPath)
+
+    const migrated = await exportModule.persistEpisodeAssets(
+      {
+        campaign: "Миграция",
+        backgrounds: [],
+        characters: [],
+        tracks: [],
+        soundpad: [],
+        groupTracks: {
+          Завязка: {
+            id: "grp-migrate",
+            title: "Мигрирующий трек",
+            // URL указывает на старый slug — файл на диске там есть
+            src: "/assets/episodes/old-slug/music/theme.mp3",
+          },
+        },
+        mapTokens: [],
+        sceneNotes: {},
+      },
+      "new-slug"
+    )
+    const migratedSrc = migrated.file.groupTracks["Завязка"]?.src ?? ""
+    report(
+      "экспорт: трек со старого slug мигрирует в текущий",
+      migratedSrc.startsWith("/assets/episodes/new-slug/music/"),
+      migratedSrc
+    )
+    const migratedAbs = migratedSrc.startsWith(EPISODES_URL)
+      ? resolve(episodesRoot, migratedSrc.slice(EPISODES_URL.length))
+      : ""
+    if (migratedAbs && existsSync(migratedAbs)) uploadedFiles.push(migratedAbs)
+    report(
+      "экспорт: мигрированный файл лежит на диске",
+      Boolean(migratedAbs) && existsSync(migratedAbs),
+      migratedAbs || "нет URL"
+    )
   } catch (error) {
     report("ассеты: смоук выполнился", false, error?.message ?? String(error))
   } finally {
@@ -561,8 +693,8 @@ export async function runAssetServerSmoke() {
   const packageJsonPath = resolve(root, "package.json")
   const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8"))
   report(
-    "CI: version в package.json = 0.1.1",
-    packageJson.version === "0.1.1",
+    "CI: version в package.json = 0.1.2",
+    packageJson.version === "0.1.2",
     String(packageJson.version)
   )
 
